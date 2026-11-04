@@ -5421,6 +5421,7 @@ name = "onelink"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-util",
  "gethostname",
  "gpui-kit",
  "iroh",
