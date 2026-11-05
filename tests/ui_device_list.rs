@@ -1,13 +1,18 @@
 mod common;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use gpui_kit::TestAppContext;
 use gpui_kit::prelude::*;
 use gpui_kit::test::TestWindowExt;
+use gpui_kit::{
+    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div,
+};
 use onelink::model::DeviceInfo;
 use onelink::net::UiEvent;
-use onelink::ui::device_list::DeviceList;
+use onelink::ui::device_list::{DeviceList, DeviceListEvent};
 
 #[gpui_kit::test]
 fn device_rows_show_status_dot_and_name(cx: &mut TestAppContext) {
@@ -111,4 +116,54 @@ fn empty_registry_shows_placeholder(cx: &mut TestAppContext) {
         );
     })
     .unwrap();
+}
+
+/// 宿主包装：持有订阅（Subscription drop 即取消）。
+struct RowClickHost {
+    list: Entity<DeviceList>,
+    _sub: Subscription,
+}
+
+impl Render for RowClickHost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(self.list.clone())
+    }
+}
+
+#[gpui_kit::test]
+fn clicking_device_row_emits_selected(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let events: Rc<RefCell<Vec<DeviceListEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&events);
+
+    let (handle, _host) = common::open_window(cx, None, move |_window, cx| {
+        cx.new(move |cx| {
+            let list = cx.new(|cx| {
+                let mut list = DeviceList::new(cx);
+                list.registry_mut().upsert(DeviceInfo {
+                    node_id: "n1".into(),
+                    name: "书房Mac".into(),
+                    addr: None,
+                    online: true,
+                    last_seen: SystemTime::now(),
+                });
+                list
+            });
+            let sub = cx.subscribe(&list, move |_h, _l, ev: &DeviceListEvent, _cx| {
+                sink.borrow_mut().push(ev.clone());
+            });
+            RowClickHost { list, _sub: sub }
+        })
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        window.click("device-n1", cx);
+    })
+    .unwrap();
+
+    assert_eq!(
+        *events.borrow(),
+        vec![DeviceListEvent::Selected("n1".into())]
+    );
 }
