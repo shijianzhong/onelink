@@ -3,13 +3,14 @@
 mod common;
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::prelude::*;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, TestAppContext,
-    Window, WindowHandle, base::Root, div,
+    Context, Entity, ExternalPaths, FileDropEvent, InputEvent, IntoElement, ParentElement, Render,
+    Styled, Subscription, TestAppContext, Window, WindowHandle, base::Root, div,
 };
 use onelink::ui::chat_panel::{ChatPanel, ChatPanelEvent};
 use onelink::ui::transfer_row::{TransferState, TransferView};
@@ -114,6 +115,30 @@ fn attach_button_emits_pick_file(cx: &mut TestAppContext) {
     })
     .unwrap();
     assert_eq!(*events.borrow(), vec![ChatPanelEvent::PickFile]);
+}
+
+#[gpui_kit::test]
+fn dropping_files_emits_drop_files(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, _host, events) = open_panel(cx, Vec::new());
+    let path = PathBuf::from("/tmp/onelink-drop.txt");
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let position = window.find("chat-panel").bounds().center();
+        let paths = ExternalPaths([path.clone()].into_iter().collect());
+        window.dispatch_event(
+            FileDropEvent::Entered { position, paths }.to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(FileDropEvent::Submit { position }.to_platform_input(), cx);
+    })
+    .unwrap();
+
+    assert_eq!(
+        *events.borrow(),
+        vec![ChatPanelEvent::DropFiles(vec![path])]
+    );
 }
 
 #[gpui_kit::test]

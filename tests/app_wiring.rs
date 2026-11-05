@@ -2,11 +2,12 @@
 
 mod common;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::prelude::*;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{App, Entity, TestAppContext};
+use gpui_kit::{App, Entity, ExternalPaths, FileDropEvent, InputEvent, TestAppContext};
 use onelink::app::App as OneLinkApp;
 use onelink::net::{IrohServiceHandle, UiEvent, shutdown_iroh_service, spawn_iroh_service};
 
@@ -195,6 +196,47 @@ fn transfer_offer_renders_accept_row_in_selected_chat(cx: &mut TestAppContext) {
         assert!(
             window.try_find("xfer-accept-5").is_some(),
             "accept button should render"
+        );
+    })
+    .unwrap();
+
+    shutdown_iroh_service(&service);
+}
+
+#[gpui_kit::test]
+fn dropping_file_starts_transfer_in_selected_chat(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, app, service) = open_app(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        seed_device(&app, cx, "n1");
+        window.draw(cx).clear(cx);
+        window.click("device-n1", cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let position = window.find("chat-panel").bounds().center();
+        let paths = ExternalPaths(
+            [PathBuf::from("/tmp/onelink-drop.txt")]
+                .into_iter()
+                .collect(),
+        );
+        window.dispatch_event(
+            FileDropEvent::Entered { position, paths }.to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(FileDropEvent::Submit { position }.to_platform_input(), cx);
+    })
+    .unwrap();
+
+    // 无效 node id 时服务返回 xfer_id 0，但传输行必须先出现在当前会话里。
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(
+            window.try_find("xfer-row-0").is_some(),
+            "drop should add a transfer row"
         );
     })
     .unwrap();

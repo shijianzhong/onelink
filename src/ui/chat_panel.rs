@@ -3,11 +3,13 @@
 //! 发送不在组件内直接做网络 I/O：按钮把文本以 [`ChatPanelEvent::Send`] 抛出，
 //! 由 `App` 订阅后投递给 iroh 服务（UI 线程永不阻塞）。
 
+use std::path::PathBuf;
+
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Subscription,
-    Window, div, prelude::*, px, rgb,
+    App, Context, Entity, EventEmitter, ExternalPaths, IntoElement, ParentElement, Render, Styled,
+    Subscription, Window, div, prelude::*, px, rgb,
 };
 
 use crate::chat::ChatMessage;
@@ -24,6 +26,8 @@ pub enum ChatPanelEvent {
     AcceptFile(u64),
     /// 用户拒绝接收 `xfer_id` 对应的文件。
     RejectFile(u64),
+    /// 用户把文件拖进聊天面板，携带拖入的路径（至少一个）。
+    DropFiles(Vec<PathBuf>),
 }
 
 impl EventEmitter<ChatPanelEvent> for ChatPanel {}
@@ -249,5 +253,19 @@ impl Render for ChatPanel {
                             })),
                     ),
             )
+            // 平台把外部文件拖入转成内部 drag，这里接收 drop 后只抛事件，不直接发网络请求。
+            .on_drop::<ExternalPaths>({
+                let this = cx.weak_entity();
+                move |paths: &ExternalPaths, _window, cx| {
+                    let files: Vec<PathBuf> = paths.paths().to_vec();
+                    if files.is_empty() {
+                        return;
+                    }
+                    this.update(cx, move |_this, cx| {
+                        cx.emit(ChatPanelEvent::DropFiles(files));
+                    })
+                    .ok();
+                }
+            })
     }
 }

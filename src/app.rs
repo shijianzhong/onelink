@@ -1,6 +1,7 @@
 //! 根组件：左侧设备列表 + 右侧聊天面板，并运行事件泵把网络事件落地到两个子组件。
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -82,6 +83,7 @@ impl App {
                     cx.notify();
                 }
                 ChatPanelEvent::PickFile => this.pick_file(cx),
+                ChatPanelEvent::DropFiles(paths) => this.send_dropped(paths.clone(), cx),
                 ChatPanelEvent::AcceptFile(xfer_id) => {
                     this.service.accept_file(*xfer_id);
                     this.update_transfer_of_selected(*xfer_id, TransferState::Active(0.0), cx);
@@ -147,22 +149,37 @@ impl App {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
-            this.update(cx, |app, cx| {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string());
-                let xfer_id = app.service.send_file(&peer, path);
-                app.transfers.entry(peer).or_default().push(TransferView {
-                    xfer_id,
-                    name,
-                    state: TransferState::Waiting,
-                });
-                app.push_transfers(cx);
-            })
-            .ok();
+            this.update(cx, |app, cx| app.send_path(peer, path, cx))
+                .ok();
         })
         .detach();
+    }
+
+    /// 拖入文件：只发给当前选中会话；一次拖入多个时只发第一个（无队列，M4 再做）。
+    fn send_dropped(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(peer) = self.chat_store.selected().map(str::to_string) else {
+            tracing::info!("dropped file ignored: no peer selected");
+            return;
+        };
+        let Some(path) = paths.into_iter().next() else {
+            return;
+        };
+        self.send_path(peer, path, cx);
+    }
+
+    /// 把路径交给 iroh 服务，并在当前会话加一条 `Waiting` 传输行（📎 与拖拽共用）。
+    fn send_path(&mut self, peer: String, path: PathBuf, cx: &mut Context<Self>) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        let xfer_id = self.service.send_file(&peer, path);
+        self.transfers.entry(peer).or_default().push(TransferView {
+            xfer_id,
+            name,
+            state: TransferState::Waiting,
+        });
+        self.push_transfers(cx);
     }
 
     /// 更新当前选中会话里某条传输行的状态。
