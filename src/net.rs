@@ -11,7 +11,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use tokio::io::AsyncWriteExt;
 
-use crate::proto::Frame;
+use crate::proto::{Frame, MAX_FRAME_BYTES, decode_frame, encode_frame};
 
 /// 连接/协议 ALPN 常量：`Endpoint::builder().alpns(...)` 声明后，不匹配的
 /// 连接会在握手层被自动拒绝（iroh 官方模式）。
@@ -45,6 +45,13 @@ pub enum UiEvent {
     },
     DeviceLost {
         node_id: String,
+    },
+    /// 收到对端发来的一条聊天消息。
+    ChatReceived {
+        node_id: String,
+        id: u64,
+        text: String,
+        sent_at_ms: u64,
     },
     NetError(String),
 }
@@ -237,6 +244,91 @@ async fn answer_hello(conn: iroh::endpoint::Connection, our_name: &str) -> anyho
     Ok(())
 }
 
+/// 服务端：一条 accept 循环，按 [`Frame`] 分派握手与聊天。非 OneLink 客户端
+/// 发来的畸形字节只记日志并关流，不影响进程。
+pub async fn serve_frames(
+    endpoint: &Endpoint,
+    our_name: &str,
+    queue: &Arc<EventQueue>,
+) -> anyhow::Result<()> {
+    while let Some(incoming) = endpoint.accept().await {
+        let our_name = our_name.to_string();
+        let queue = Arc::clone(queue);
+        tokio::spawn(async move {
+            let conn = match incoming.await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("incoming connection failed: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = dispatch_connection(conn, &our_name, &queue).await {
+                tracing::warn!("frame dispatch failed: {e:#}");
+            }
+        });
+    }
+    Ok(())
+}
+
+/// 读一帧并回应：`Hello` 回 `HelloAck`，`Chat` 入队 `ChatReceived` 并回 `ChatAck`。
+pub async fn dispatch_connection(
+    conn: iroh::endpoint::Connection,
+    our_name: &str,
+    queue: &Arc<EventQueue>,
+) -> anyhow::Result<()> {
+    let (mut send, mut recv) = conn
+        .accept_bi()
+        .await
+        .map_err(|e| anyhow::anyhow!("accept_bi: {e}"))?;
+    let buf = recv
+        .read_to_end(MAX_FRAME_BYTES)
+        .await
+        .map_err(|e| anyhow::anyhow!("read frame: {e}"))?;
+    let frame = match decode_frame(&buf, MAX_FRAME_BYTES) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("bad frame from {}: {e:#}", conn.remote_id());
+            return Ok(());
+        }
+    };
+    match frame {
+        Frame::Hello { name } => {
+            tracing::info!(peer_name = %name, "received hello");
+            let ack = encode_frame(&Frame::HelloAck {
+                name: our_name.to_string(),
+            })?;
+            send.write_all(&ack).await?;
+            send.shutdown().await?;
+            // 回完 ACK 必须等对端关闭，否则拆链会让 ACK 丢失（M1 实机复现）。
+            let reason = conn.closed().await;
+            tracing::debug!("handshake connection closed: {reason:?}");
+        }
+        Frame::Chat {
+            id,
+            text,
+            sent_at_ms,
+        } => {
+            tracing::debug!(%id, bytes = text.len(), "received chat frame");
+            push_event(
+                queue,
+                UiEvent::ChatReceived {
+                    node_id: conn.remote_id().to_string(),
+                    id,
+                    text,
+                    sent_at_ms,
+                },
+            );
+            let ack = encode_frame(&Frame::ChatAck { id })?;
+            send.write_all(&ack).await?;
+            send.shutdown().await?;
+            let reason = conn.closed().await;
+            tracing::debug!("chat connection closed: {reason:?}");
+        }
+        other => tracing::warn!("unexpected frame on server side: {other:?}"),
+    }
+    Ok(())
+}
+
 /// 启动 iroh 服务线程：Endpoint(presets::N0，官方 relay 兜底) + mDNS 发现 +
 /// 连接 accept 循环。事件经有界队列暴露在 `handle.tx` 供 UI 轮询。
 pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
@@ -273,12 +365,14 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
                 .add(mdns.clone());
             tracing::info!("mDNS service registered");
 
-            // 被动握手任务：accept 循环（非 ALPN 连接已在 alpns 层拒绝）。
+            // 服务端任务：一条 accept 循环，同时服务握手与聊天帧
+            // （非 ALPN 连接已在 alpns 层拒绝）。
             let endpoint_serve = endpoint.clone();
             let serve_name = our_name.clone();
+            let serve_queue = Arc::clone(&service_queue);
             let serve_task = tokio::spawn(async move {
-                if let Err(e) = serve_handshake(&endpoint_serve, &serve_name).await {
-                    tracing::warn!("serve_handshake ended: {e:#}");
+                if let Err(e) = serve_frames(&endpoint_serve, &serve_name, &serve_queue).await {
+                    tracing::warn!("serve_frames ended: {e:#}");
                 }
             });
 

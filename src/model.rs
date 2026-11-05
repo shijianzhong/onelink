@@ -135,6 +135,8 @@ pub fn apply_ui_event(
                 .collect()
         }
         UiEvent::DeviceLost { node_id } => registry.mark_offline(&node_id).into_iter().collect(),
+        // 聊天消息不进设备注册表，由 ChatStore 承接（M2 Task 4）。
+        UiEvent::ChatReceived { .. } => Vec::new(),
         UiEvent::NetError(_) => Vec::new(),
     }
 }

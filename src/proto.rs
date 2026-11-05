@@ -3,7 +3,7 @@
 //! `Frame` 是 M1 的 `HelloMsg` 的超集：`Hello`/`HelloAck` 的线格式与 M1 逐字节一致
 //! （externally tagged 默认序列化，`{"Hello":{"name":"x"}}`），旧版本握手不受影响。
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,7 +17,11 @@ pub enum Frame {
     /// 服务端应答：报告自己的设备名。
     HelloAck { name: String },
     /// 一条聊天消息。
-    Chat { id: u64, text: String, sent_at_ms: u64 },
+    Chat {
+        id: u64,
+        text: String,
+        sent_at_ms: u64,
+    },
     /// 对 `Chat` 的送达确认（回带 id）。
     ChatAck { id: u64 },
 }

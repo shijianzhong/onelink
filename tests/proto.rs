@@ -5,7 +5,11 @@ fn roundtrips_all_variants() {
     let frames = [
         Frame::Hello { name: "A".into() },
         Frame::HelloAck { name: "B".into() },
-        Frame::Chat { id: 7, text: "你好".into(), sent_at_ms: 1700000000000 },
+        Frame::Chat {
+            id: 7,
+            text: "你好".into(),
+            sent_at_ms: 1700000000000,
+        },
         Frame::ChatAck { id: 7 },
     ];
     for f in frames {
@@ -18,7 +22,10 @@ fn roundtrips_all_variants() {
 fn hello_wire_format_stays_m1_compatible() {
     // M1 的 HelloMsg 就是 {"Hello":{"name":"x"}}，M2 必须沿用，否则旧版本互通会断
     let bytes = encode_frame(&Frame::Hello { name: "x".into() }).unwrap();
-    assert_eq!(String::from_utf8(bytes).unwrap(), r#"{"Hello":{"name":"x"}}"#);
+    assert_eq!(
+        String::from_utf8(bytes).unwrap(),
+        r#"{"Hello":{"name":"x"}}"#
+    );
 }
 
 #[test]
