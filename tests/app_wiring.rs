@@ -158,3 +158,120 @@ fn chat_failure_shows_hint_until_delivery(cx: &mut TestAppContext) {
 
     shutdown_iroh_service(&service);
 }
+
+#[gpui_kit::test]
+fn transfer_offer_renders_accept_row_in_selected_chat(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, app, service) = open_app(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        seed_device(&app, cx, "n1");
+        window.draw(cx).clear(cx);
+        window.click("device-n1", cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, _, cx| {
+        app.update(cx, |app, cx| {
+            app.apply_batch(
+                vec![UiEvent::TransferOffer {
+                    node_id: "n1".into(),
+                    xfer_id: 5,
+                    name: "a.bin".into(),
+                    size: 2048,
+                }],
+                cx,
+            );
+        });
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(
+            window.try_find("xfer-row-5").is_some(),
+            "offer row should render"
+        );
+        assert!(
+            window.try_find("xfer-accept-5").is_some(),
+            "accept button should render"
+        );
+    })
+    .unwrap();
+
+    shutdown_iroh_service(&service);
+}
+
+#[gpui_kit::test]
+fn progress_and_completion_update_row(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, app, service) = open_app(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        seed_device(&app, cx, "n1");
+        window.draw(cx).clear(cx);
+        window.click("device-n1", cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, _, cx| {
+        app.update(cx, |app, cx| {
+            app.apply_batch(
+                vec![
+                    UiEvent::TransferOffer {
+                        node_id: "n1".into(),
+                        xfer_id: 5,
+                        name: "a.bin".into(),
+                        size: 2048,
+                    },
+                    UiEvent::TransferProgress {
+                        node_id: "n1".into(),
+                        xfer_id: 5,
+                        transferred: 1024,
+                        total: 2048,
+                    },
+                ],
+                cx,
+            );
+        });
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let text = window
+            .find("xfer-progress-5")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(text, "50%");
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, _, cx| {
+        app.update(cx, |app, cx| {
+            app.apply_batch(
+                vec![UiEvent::TransferCompleted {
+                    node_id: "n1".into(),
+                    xfer_id: 5,
+                    path: None,
+                }],
+                cx,
+            );
+        });
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let text = window
+            .find("xfer-state-5")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(text.contains("完成"), "state was {text:?}");
+    })
+    .unwrap();
+
+    shutdown_iroh_service(&service);
+}

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iroh::endpoint::presets;
-use onelink::net::{ALPN, EVENT_QUEUE_CAPACITY, EventQueue, UiEvent, serve_frames};
+use onelink::net::{ALPN, EVENT_QUEUE_CAPACITY, EventQueue, UiEvent, XferState, serve_frames};
 use onelink::proto::{Frame, MAX_FRAME_BYTES, decode_frame, encode_frame};
 use tokio::io::AsyncWriteExt;
 
@@ -18,8 +18,10 @@ async fn chat_frame_reaches_event_queue_and_gets_ack() {
 
     let q = Arc::clone(&queue);
     let a_serve = a.clone();
+    let xfers = Arc::new(XferState::new());
+    let x = Arc::clone(&xfers);
     let server = tokio::spawn(async move {
-        let _ = serve_frames(&a_serve, "服务端A", &q).await;
+        let _ = serve_frames(&a_serve, "服务端A", &q, &x).await;
     });
 
     let conn = b.connect(a.addr(), ALPN).await.unwrap();
@@ -72,8 +74,10 @@ async fn hello_still_answered_by_frame_dispatch() {
 
     let q = Arc::clone(&queue);
     let a_serve = a.clone();
+    let xfers = Arc::new(XferState::new());
+    let x = Arc::clone(&xfers);
     let server = tokio::spawn(async move {
-        let _ = serve_frames(&a_serve, "服务端A", &q).await;
+        let _ = serve_frames(&a_serve, "服务端A", &q, &x).await;
     });
 
     let got = onelink::net::handshake_name(&b, a.addr(), "客户端B")

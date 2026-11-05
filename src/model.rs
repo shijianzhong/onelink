@@ -135,10 +135,16 @@ pub fn apply_ui_event(
                 .collect()
         }
         UiEvent::DeviceLost { node_id } => registry.mark_offline(&node_id).into_iter().collect(),
-        // 聊天消息/送达状态不进设备注册表，由 ChatStore 承接（M2 Task 4）。
+        // 聊天消息/送达状态不进设备注册表，由 ChatStore 承接（M2 Task 4）；
+        // 传输事件归传输 UI（M3 Task 5），注册表只关心设备本身。
         UiEvent::ChatReceived { .. }
         | UiEvent::ChatDelivered { .. }
-        | UiEvent::ChatFailed { .. } => Vec::new(),
+        | UiEvent::ChatFailed { .. }
+        | UiEvent::TransferOffer { .. }
+        | UiEvent::TransferProgress { .. }
+        | UiEvent::TransferCompleted { .. }
+        | UiEvent::TransferFailed { .. }
+        | UiEvent::TransferRejected { .. } => Vec::new(),
         UiEvent::NetError(_) => Vec::new(),
     }
 }

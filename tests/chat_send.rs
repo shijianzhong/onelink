@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use iroh::endpoint::presets;
 use onelink::net::{
-    ALPN, EVENT_QUEUE_CAPACITY, EventQueue, UiEvent, send_chat_frame, serve_frames,
+    ALPN, EVENT_QUEUE_CAPACITY, EventQueue, UiEvent, XferState, send_chat_frame, serve_frames,
     shutdown_iroh_service, spawn_iroh_service,
 };
 use onelink::proto::{Frame, now_ms};
@@ -32,8 +32,10 @@ async fn send_chat_frame_delivers_and_gets_ack() {
 
     let q = Arc::clone(&queue);
     let b_serve = b.clone();
+    let xfers = Arc::new(XferState::new());
+    let x = Arc::clone(&xfers);
     let server = tokio::spawn(async move {
-        let _ = serve_frames(&b_serve, "对端B", &q).await;
+        let _ = serve_frames(&b_serve, "对端B", &q, &x).await;
     });
 
     let f = Frame::Chat {

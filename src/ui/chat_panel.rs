@@ -11,12 +11,19 @@ use gpui_kit::{
 };
 
 use crate::chat::ChatMessage;
+use crate::ui::transfer_row::{self, TransferView};
 
 /// 面板向外抛的事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatPanelEvent {
     /// 用户点了发送，携带已 trim 校验过的文本。
     Send(String),
+    /// 用户点了 📎，请求选择要发送的文件。
+    PickFile,
+    /// 用户同意接收 `xfer_id` 对应的文件。
+    AcceptFile(u64),
+    /// 用户拒绝接收 `xfer_id` 对应的文件。
+    RejectFile(u64),
 }
 
 impl EventEmitter<ChatPanelEvent> for ChatPanel {}
@@ -25,6 +32,8 @@ pub struct ChatPanel {
     input: Entity<InputState>,
     peer: Option<String>,
     messages: Vec<ChatMessage>,
+    /// 当前会话的传输行（由 `App` 按 peer 维护后推入）。
+    transfers: Vec<TransferView>,
     /// 最近一次发送失败的提示（成功发送或送达后清空）。
     error: Option<String>,
     /// 输入框回车订阅（Enter 直接发送）。
@@ -50,9 +59,19 @@ impl ChatPanel {
             input,
             peer: None,
             messages: Vec::new(),
+            transfers: Vec::new(),
             error: None,
             _input_sub: input_sub,
         }
+    }
+
+    /// 刷新当前会话的传输行（无变化不重绘）。
+    pub fn set_transfers(&mut self, transfers: Vec<TransferView>, cx: &mut Context<Self>) {
+        if self.transfers == transfers {
+            return;
+        }
+        self.transfers = transfers;
+        cx.notify();
     }
 
     /// 设置/清除发送失败提示。
@@ -146,6 +165,19 @@ impl Render for ChatPanel {
             list = list.child(message_row(msg));
         }
 
+        let transfers = (!self.transfers.is_empty()).then(|| {
+            let mut block = div()
+                .id("chat-transfers")
+                .test_support()
+                .flex()
+                .flex_col()
+                .gap(px(4.));
+            for view in &self.transfers {
+                block = block.child(transfer_row::render(view, cx));
+            }
+            block
+        });
+
         let error_row = self.error.clone().map(|reason| {
             div()
                 .id("chat-error")
@@ -174,12 +206,27 @@ impl Render for ChatPanel {
                     .child(header),
             )
             .child(list)
+            .when_some(transfers, |el, block| el.child(block))
             .when_some(error_row, |el, row| el.child(row))
             .child(
                 div()
                     .flex()
                     .gap(px(8.))
                     .items_center()
+                    .child(
+                        div()
+                            .id("chat-attach")
+                            .test_support()
+                            .aria_label("发送文件")
+                            .px(px(8.))
+                            .py(px(6.))
+                            .rounded(px(6.))
+                            .bg(rgb(0xF1F3F4))
+                            .child("📎")
+                            .on_click(cx.listener(|_this, _ev, _window, cx| {
+                                cx.emit(ChatPanelEvent::PickFile);
+                            })),
+                    )
                     .child(
                         div()
                             .flex_1()
