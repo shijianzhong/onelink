@@ -9,8 +9,9 @@ use futures_util::StreamExt;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
-use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
+
+use crate::proto::Frame;
 
 /// 连接/协议 ALPN 常量：`Endpoint::builder().alpns(...)` 声明后，不匹配的
 /// 连接会在握手层被自动拒绝（iroh 官方模式）。
@@ -26,12 +27,9 @@ pub const EVENT_QUEUE_CAPACITY: usize = 32;
 /// 握手协议单条消息的大小上限（防御畸形/超大 payload）。
 pub const MAX_HANDSHAKE_BYTES: usize = 4096;
 
-/// 握手消息：客户端 `Hello{本机名}`，服务端回 `HelloAck{本机名}`。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum HelloMsg {
-    Hello { name: String },
-    HelloAck { name: String },
-}
+/// 握手消息别名：M1 的 `HelloMsg` 现由 [`Frame`] 的 `Hello`/`HelloAck` 变体承载，
+/// 线格式逐字节不变（`{"Hello":{"name":"x"}}`）。
+pub type HelloMsg = Frame;
 
 /// 网络层 → UI 侧事件。
 #[derive(Debug, Clone)]
@@ -189,7 +187,7 @@ pub async fn handshake_name(
         .map_err(|e| anyhow::anyhow!("read hello ack: {e}"))?;
     match serde_json::from_slice::<HelloMsg>(&buf)? {
         HelloMsg::HelloAck { name } => Ok(name),
-        HelloMsg::Hello { .. } => anyhow::bail!("expected HelloAck, got Hello"),
+        other => anyhow::bail!("expected HelloAck, got {other:?}"),
     }
 }
 
@@ -224,7 +222,7 @@ async fn answer_hello(conn: iroh::endpoint::Connection, our_name: &str) -> anyho
         .map_err(|e| anyhow::anyhow!("read hello: {e}"))?;
     let peer_name = match serde_json::from_slice::<HelloMsg>(&buf)? {
         HelloMsg::Hello { name } => name,
-        HelloMsg::HelloAck { .. } => anyhow::bail!("expected Hello, got HelloAck"),
+        other => anyhow::bail!("expected Hello, got {other:?}"),
     };
     tracing::info!(peer_name, "received hello");
     let ack = serde_json::to_vec(&HelloMsg::HelloAck {
