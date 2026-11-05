@@ -75,4 +75,57 @@ impl DeviceRegistry {
     pub fn is_known(&self, node_id: &str) -> bool {
         self.devices.contains_key(node_id)
     }
+
+    /// 按 node_id 查设备。
+    pub fn get(&self, node_id: &str) -> Option<&DeviceInfo> {
+        self.devices.get(node_id)
+    }
+}
+
+/// 未命名设备的占位名：node id 前 8 位。
+fn placeholder_name(node_id: &str) -> String {
+    node_id.chars().take(8).collect()
+}
+
+/// 把一条网络事件应用到注册表，返回产生的变更列表（UI 侧直接消费）。
+pub fn apply_ui_event(registry: &mut DeviceRegistry, event: crate::net::UiEvent) -> Vec<DeviceChange> {
+    use crate::net::UiEvent;
+
+    match event {
+        UiEvent::DeviceDiscovered { node_id, addr } => {
+            // 重复发现（地址变化）保留已有名字，只刷新在线状态与地址
+            let existing = registry.get(&node_id).cloned();
+            let name = existing
+                .as_ref()
+                .map(|d| d.name.clone())
+                .unwrap_or_else(|| placeholder_name(&node_id));
+            let addr = addr.or_else(|| existing.and_then(|d| d.addr));
+            registry
+                .upsert(DeviceInfo {
+                    node_id,
+                    name,
+                    addr,
+                    online: true,
+                    last_seen: SystemTime::now(),
+                })
+                .into_iter()
+                .collect()
+        }
+        UiEvent::DeviceNamed { node_id, name } => {
+            // 握手换来真名：更新 name / online，保留发现时拿到的地址
+            let addr = registry.get(&node_id).and_then(|d| d.addr.clone());
+            registry
+                .upsert(DeviceInfo {
+                    node_id,
+                    name,
+                    addr,
+                    online: true,
+                    last_seen: SystemTime::now(),
+                })
+                .into_iter()
+                .collect()
+        }
+        UiEvent::DeviceLost { node_id } => registry.mark_offline(&node_id).into_iter().collect(),
+        UiEvent::NetError(_) => Vec::new(),
+    }
 }

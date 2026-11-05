@@ -1,12 +1,15 @@
-//! iroh 服务层与事件桥接：局域网设备发现 + 有界事件队列。
+//! iroh 服务层与事件桥接：局域网设备发现 + 握手交换设备名 + 有界事件队列。
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use iroh::endpoint::presets;
-use iroh::Endpoint;
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 
 /// 连接/协议 ALPN 常量：`Endpoint::builder().alpns(...)` 声明后，不匹配的
 /// 连接会在握手层被自动拒绝（iroh 官方模式）。
@@ -19,10 +22,22 @@ pub const MDNS_SERVICE: &str = "onelink-v1";
 /// 事件队列容量：满时丢弃（`push_event` 不阻塞网络线程）。
 pub const EVENT_QUEUE_CAPACITY: usize = 32;
 
+/// 握手协议单条消息的大小上限（防御畸形/超大 payload）。
+pub const MAX_HANDSHAKE_BYTES: usize = 4096;
+
+/// 握手消息：客户端 `Hello{本机名}`，服务端回 `HelloAck{本机名}`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HelloMsg {
+    Hello { name: String },
+    HelloAck { name: String },
+}
+
 /// 网络层 → UI 侧事件。
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     DeviceDiscovered { node_id: String, addr: Option<String> },
+    /// 握手完成，拿到对方设备名（注册表更新 name）。
+    DeviceNamed { node_id: String, name: String },
     DeviceLost { node_id: String },
     NetError(String),
 }
@@ -102,7 +117,7 @@ impl MdnsEventLike for DiscoveryEvent {
 }
 
 /// 将一条 mDNS 事件翻译为 0..N 条 UI 事件。
-pub fn translate_mdns_event(ev: impl MdnsEventLike) -> Vec<UiEvent> {
+pub fn translate_mdns_event(ev: &impl MdnsEventLike) -> Vec<UiEvent> {
     if let Some((node_id, addr)) = ev.as_discovered() {
         vec![UiEvent::DeviceDiscovered { node_id, addr }]
     } else if let Some(node_id) = ev.as_expired() {
@@ -115,6 +130,87 @@ pub fn translate_mdns_event(ev: impl MdnsEventLike) -> Vec<UiEvent> {
 /// 有界事件入队：满丢旧、不阻塞调用方（网络线程）。
 pub fn push_event(q: &EventQueue, ev: UiEvent) {
     q.push(ev);
+}
+
+/// 本机显示名（默认取系统主机名）。
+pub fn local_device_name() -> String {
+    gethostname::gethostname().to_string_lossy().to_string()
+}
+
+/// 主动握手：连接对方，打开双向流发 `Hello{our_name}`，读回 `HelloAck{name}`。
+pub async fn handshake_name(
+    endpoint: &Endpoint,
+    peer: EndpointAddr,
+    our_name: &str,
+) -> anyhow::Result<String> {
+    let conn = endpoint
+        .connect(peer, ALPN)
+        .await
+        .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| anyhow::anyhow!("open_bi: {e}"))?;
+    let hello = serde_json::to_vec(&HelloMsg::Hello {
+        name: our_name.to_string(),
+    })?;
+    send.write_all(&hello).await?;
+    send.shutdown().await?;
+
+    let buf = recv
+        .read_to_end(MAX_HANDSHAKE_BYTES)
+        .await
+        .map_err(|e| anyhow::anyhow!("read hello ack: {e}"))?;
+    match serde_json::from_slice::<HelloMsg>(&buf)? {
+        HelloMsg::HelloAck { name } => Ok(name),
+        HelloMsg::Hello { .. } => anyhow::bail!("expected HelloAck, got Hello"),
+    }
+}
+
+/// 被动握手：循环接受连接，读 `Hello`、回 `HelloAck{our_name}`。
+pub async fn serve_handshake(endpoint: &Endpoint, our_name: &str) -> anyhow::Result<()> {
+    while let Some(incoming) = endpoint.accept().await {
+        let our_name = our_name.to_string();
+        tokio::spawn(async move {
+            let conn = match incoming.await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("incoming connection failed: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = answer_hello(conn, &our_name).await {
+                tracing::warn!("hello exchange failed: {e:#}");
+            }
+        });
+    }
+    Ok(())
+}
+
+async fn answer_hello(conn: iroh::endpoint::Connection, our_name: &str) -> anyhow::Result<()> {
+    let (mut send, mut recv) = conn
+        .accept_bi()
+        .await
+        .map_err(|e| anyhow::anyhow!("accept_bi: {e}"))?;
+    let buf = recv
+        .read_to_end(MAX_HANDSHAKE_BYTES)
+        .await
+        .map_err(|e| anyhow::anyhow!("read hello: {e}"))?;
+    let peer_name = match serde_json::from_slice::<HelloMsg>(&buf)? {
+        HelloMsg::Hello { name } => name,
+        HelloMsg::HelloAck { .. } => anyhow::bail!("expected Hello, got HelloAck"),
+    };
+    tracing::info!(peer_name, "received hello");
+    let ack = serde_json::to_vec(&HelloMsg::HelloAck {
+        name: our_name.to_string(),
+    })?;
+    send.write_all(&ack).await?;
+    send.shutdown().await?;
+    // 保持连接直到对端读完 ACK 并关闭：若此处立即 drop，QUIC 会拆链，
+    // 尚未送达的 ACK 数据会被丢弃（客户端读到 connection lost）。
+    let reason = conn.closed().await;
+    tracing::debug!("handshake connection closed: {reason:?}");
+    Ok(())
 }
 
 /// 启动 iroh 服务线程：Endpoint(presets::N0，官方 relay 兜底) + mDNS 发现 +
@@ -134,8 +230,10 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
                 .bind()
                 .await
                 .map_err(|e| anyhow::anyhow!("endpoint bind: {e}"))?;
-            let node_id = endpoint.id().to_string();
-            tracing::info!(node_id, %MDNS_SERVICE, "iroh endpoint bound");
+            let self_id = endpoint.id();
+            let node_id = self_id.to_string();
+            let our_name = local_device_name();
+            tracing::info!(node_id, our_name, %MDNS_SERVICE, "iroh endpoint bound");
 
             let mdns = MdnsAddressLookup::builder()
                 .service_name(MDNS_SERVICE)
@@ -147,39 +245,73 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
                 .add(mdns.clone());
             tracing::info!("mDNS service registered");
 
-            // 事件任务：mDNS discovered/expired → UiEvent。
+            // 被动握手任务：accept 循环（非 ALPN 连接已在 alpns 层拒绝）。
+            let endpoint_serve = endpoint.clone();
+            let serve_name = our_name.clone();
+            let serve_task = tokio::spawn(async move {
+                if let Err(e) = serve_handshake(&endpoint_serve, &serve_name).await {
+                    tracing::warn!("serve_handshake ended: {e:#}");
+                }
+            });
+
+            // 发现任务：mDNS discovered/expired → UiEvent；发现即主动握手换设备名。
             let mdns_queue = Arc::clone(&service_queue);
+            let endpoint_mdns = endpoint.clone();
+            let mdns_name = our_name.clone();
             let mdns_task = tokio::spawn(async move {
                 let mut stream = mdns.subscribe().await;
+                let mut handshaked: HashSet<EndpointId> = HashSet::new();
                 while let Some(ev) = stream.next().await {
-                    for ui_ev in translate_mdns_event(ev) {
+                    for ui_ev in translate_mdns_event(&ev) {
                         push_event(&mdns_queue, ui_ev);
+                    }
+                    if let DiscoveryEvent::Discovered { endpoint_info, .. } = &ev {
+                        let peer_id = endpoint_info.endpoint_id;
+                        if peer_id == self_id || !handshaked.insert(peer_id) {
+                            continue;
+                        }
+                        let ep = endpoint_mdns.clone();
+                        let name = mdns_name.clone();
+                        let q = Arc::clone(&mdns_queue);
+                        tokio::spawn(async move {
+                            let mut attempt = 0;
+                            loop {
+                                attempt += 1;
+                                match handshake_name(&ep, EndpointAddr::from(peer_id), &name).await {
+                                    Ok(peer_name) => {
+                                        push_event(
+                                            &q,
+                                            UiEvent::DeviceNamed {
+                                                node_id: peer_id.to_string(),
+                                                name: peer_name,
+                                            },
+                                        );
+                                        break;
+                                    }
+                                    Err(e) if attempt < 3 => {
+                                        tracing::debug!(
+                                            "handshake attempt {attempt} failed: {e:#}"
+                                        );
+                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "handshake with {peer_id} failed: {e:#}"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        });
                     }
                 }
                 tracing::info!("mdns event stream ended");
             });
 
-            // accept 任务：非 ALPN 连接已在 builder.alpns 层被拒绝。
-            let accept_task = tokio::spawn(async move {
-                while let Some(incoming) = endpoint.accept().await {
-                    tokio::spawn(async move {
-                        match incoming.await {
-                            Ok(conn) => {
-                                let remote = conn.remote_id();
-                                tracing::info!("accepted connection: {remote:?}");
-                                // M1 仅记录；握手（交换设备名）在 Task 5 接入。
-                            }
-                            Err(e) => tracing::warn!("connection handshake failed: {e}"),
-                        }
-                    });
-                }
-                tracing::info!("accept loop ended");
-            });
-
-            // 服务线程随任一任务结束而收尾（正常退出路径由 close 触发）。
+            // 服务线程随任一任务结束而收尾（正常退出路径由 Task 7 的 close 触发）。
             tokio::select! {
                 r = mdns_task => tracing::info!("mdns task ended: {r:?}"),
-                r = accept_task => tracing::info!("accept task ended: {r:?}"),
+                r = serve_task => tracing::info!("serve task ended: {r:?}"),
             }
             Ok::<(), anyhow::Error>(())
         });

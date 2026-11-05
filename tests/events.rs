@@ -27,7 +27,7 @@ impl MdnsEventLike for TestEvent {
 
 #[test]
 fn discovered_event_maps_to_ui_event() {
-    let evs = translate_mdns_event(TestEvent::Discovered(
+    let evs = translate_mdns_event(&TestEvent::Discovered(
         "n1".into(),
         Some("192.168.1.5:0".into()),
     ));
@@ -39,7 +39,7 @@ fn discovered_event_maps_to_ui_event() {
 
 #[test]
 fn expired_event_maps_to_lost_event() {
-    let evs = translate_mdns_event(TestEvent::Expired("n1".into()));
+    let evs = translate_mdns_event(&TestEvent::Expired("n1".into()));
     assert!(matches!(
         evs[0],
         UiEvent::DeviceLost { ref node_id } if node_id == "n1"
