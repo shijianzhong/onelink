@@ -72,8 +72,10 @@ impl ChatPanel {
 }
 
 fn message_row(msg: &ChatMessage) -> impl IntoElement {
+    // 双方 id 空间独立，同一数字 id 会在同一会话里出现；element id 必须带方向前缀。
+    let side = if msg.mine { "mine" } else { "peer" };
     let bubble = div()
-        .id(format!("msg-{}", msg.id))
+        .id(format!("msg-{side}-{}", msg.id))
         .test_support()
         .aria_label(msg.text.clone())
         .px(px(10.))

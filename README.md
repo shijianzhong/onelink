@@ -67,7 +67,7 @@ mDNS service registered
 ## 测试与检查
 
 ```bash
-cargo test                              # 36 个测试：协议帧 / 服务端分帧 / 发送通道 / 会话模型 / 注册表 / 事件队列 / 握手 / UI / 接线 / 退出
+cargo test                              # 37 个测试：协议帧 / 服务端分帧 / 发送通道 / 会话模型 / 注册表 / 事件队列 / 握手 / UI / 接线 / 退出
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
