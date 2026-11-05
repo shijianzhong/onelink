@@ -53,6 +53,17 @@ pub enum UiEvent {
         text: String,
         sent_at_ms: u64,
     },
+    /// 对端已回 ChatAck。
+    ChatDelivered {
+        node_id: String,
+        id: u64,
+    },
+    /// 发送失败（连接失败 / 超时 / ACK 不匹配）。
+    ChatFailed {
+        node_id: String,
+        id: u64,
+        reason: String,
+    },
     NetError(String),
 }
 
@@ -61,9 +72,18 @@ pub struct IrohService {
     pub node_id: String,
 }
 
+/// UI → 服务线程的上行命令。同步 `send` 不阻塞 UI 线程。
+pub enum Command {
+    SendChat { peer: EndpointAddr, frame: Frame },
+}
+
 /// 服务句柄：`tx` 是 UI 侧可轮询的有界事件队列（`try_recv`）。
 pub struct IrohServiceHandle {
     pub tx: Arc<EventQueue>,
+    /// 上行命令通道（[`IrohServiceHandle::send_chat`] 往里投递）。
+    pub commands: tokio::sync::mpsc::UnboundedSender<Command>,
+    /// 本地消息 id 计数器（与对端 id 空间独立）。
+    seq: Arc<std::sync::atomic::AtomicU64>,
     /// 置位后服务线程在下一个 100ms 检查点退出并 close endpoint。
     stop: Arc<AtomicBool>,
     /// 服务线程是否仍在运行。
@@ -75,6 +95,132 @@ pub struct IrohServiceHandle {
 impl IrohServiceHandle {
     pub fn is_running(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// 投递一条聊天消息到 `peer_id`；返回本条消息 id，调用方立刻用它渲染本地气泡。
+    ///
+    /// 同步返回：真正发送在服务线程里异步做，结果经 `ChatDelivered`/`ChatFailed` 回传。
+    pub fn send_chat(&self, peer_id: &str, text: &str) -> u64 {
+        match peer_id.parse::<EndpointId>() {
+            Ok(id) => self.send_chat_to(EndpointAddr::from(id), text),
+            Err(e) => {
+                let (msg_id, _) = self.prepare_chat(text);
+                push_event(
+                    &self.tx,
+                    UiEvent::ChatFailed {
+                        node_id: peer_id.to_string(),
+                        id: msg_id,
+                        reason: format!("bad node id: {e}"),
+                    },
+                );
+                msg_id
+            }
+        }
+    }
+
+    /// 同 [`Self::send_chat`]，但目标用 `EndpointAddr`（可带直连地址，供测试/手动直连）。
+    pub fn send_chat_to(&self, peer: EndpointAddr, text: &str) -> u64 {
+        let (msg_id, frame) = self.prepare_chat(text);
+        let node_id = peer.id.to_string();
+        if text.len() > MAX_FRAME_BYTES {
+            // 超长文本本地拒绝，绝不发半截（Review Focus 2）
+            push_event(
+                &self.tx,
+                UiEvent::ChatFailed {
+                    node_id,
+                    id: msg_id,
+                    reason: "message too large".to_string(),
+                },
+            );
+            return msg_id;
+        }
+        if self
+            .commands
+            .send(Command::SendChat { peer, frame })
+            .is_err()
+        {
+            tracing::warn!("send_chat: service command channel closed");
+        }
+        msg_id
+    }
+
+    fn prepare_chat(&self, text: &str) -> (u64, Frame) {
+        let id = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        (
+            id,
+            Frame::Chat {
+                id,
+                text: text.to_string(),
+                sent_at_ms: crate::proto::now_ms(),
+            },
+        )
+    }
+}
+
+/// 把一条 `Chat` 帧发到对端并等 `ChatAck`；ACK 的 id 不匹配视为失败。
+pub async fn send_chat_frame(
+    endpoint: &Endpoint,
+    peer: EndpointAddr,
+    frame: &Frame,
+) -> anyhow::Result<()> {
+    let expected = match frame {
+        Frame::Chat { id, .. } => *id,
+        _ => anyhow::bail!("send_chat_frame expects a Chat frame"),
+    };
+    let conn = endpoint
+        .connect(peer, ALPN)
+        .await
+        .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| anyhow::anyhow!("open_bi: {e}"))?;
+    send.write_all(&encode_frame(frame)?).await?;
+    send.shutdown().await?;
+    let buf = recv
+        .read_to_end(MAX_FRAME_BYTES)
+        .await
+        .map_err(|e| anyhow::anyhow!("read chat ack: {e}"))?;
+    match decode_frame(&buf, MAX_FRAME_BYTES)? {
+        Frame::ChatAck { id } if id == expected => Ok(()),
+        other => anyhow::bail!("expected ChatAck({expected}), got {other:?}"),
+    }
+}
+
+/// 服务线程内执行一条上行命令，把结果回写成 UI 事件。
+async fn run_command(endpoint: Endpoint, cmd: Command, queue: &Arc<EventQueue>) {
+    match cmd {
+        Command::SendChat { peer, frame } => {
+            let node_id = peer.id.to_string();
+            let id = match &frame {
+                Frame::Chat { id, .. } => *id,
+                _ => 0,
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                send_chat_frame(&endpoint, peer, &frame),
+            )
+            .await;
+            match result {
+                Ok(Ok(())) => push_event(queue, UiEvent::ChatDelivered { node_id, id }),
+                Ok(Err(e)) => push_event(
+                    queue,
+                    UiEvent::ChatFailed {
+                        node_id,
+                        id,
+                        reason: format!("{e:#}"),
+                    },
+                ),
+                Err(_) => push_event(
+                    queue,
+                    UiEvent::ChatFailed {
+                        node_id,
+                        id,
+                        reason: "send timed out after 5s".to_string(),
+                    },
+                ),
+            }
+        }
     }
 }
 
@@ -337,6 +483,8 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
     let err_queue = Arc::clone(&queue);
     let stop = Arc::new(AtomicBool::new(false));
     let alive = Arc::new(AtomicBool::new(true));
+    let seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (commands_tx, mut commands_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
     let thread_stop = Arc::clone(&stop);
     let thread_alive = Arc::clone(&alive);
     let join = std::thread::spawn(move || {
@@ -430,13 +578,29 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
             });
 
             // 服务线程随任一任务结束或 stop 信号而收尾：close endpoint 让
-            // 对端尽快看到节点下线，再退出 runtime。
+            // 对端尽快看到节点下线，再退出 runtime。命令分支不退出，只派发发送任务。
             let mut mdns_task = mdns_task;
             let mut serve_task = serve_task;
-            tokio::select! {
-                r = &mut mdns_task => tracing::info!("mdns task ended: {r:?}"),
-                r = &mut serve_task => tracing::info!("serve task ended: {r:?}"),
-                _ = wait_for_stop(Arc::clone(&thread_stop)) => tracing::info!("stop requested"),
+            loop {
+                tokio::select! {
+                    r = &mut mdns_task => {
+                        tracing::info!("mdns task ended: {r:?}");
+                        break;
+                    }
+                    r = &mut serve_task => {
+                        tracing::info!("serve task ended: {r:?}");
+                        break;
+                    }
+                    Some(cmd) = commands_rx.recv() => {
+                        let ep = endpoint.clone();
+                        let q = Arc::clone(&service_queue);
+                        tokio::spawn(async move { run_command(ep, cmd, &q).await; });
+                    }
+                    _ = wait_for_stop(Arc::clone(&thread_stop)) => {
+                        tracing::info!("stop requested");
+                        break;
+                    }
+                }
             }
             mdns_task.abort();
             serve_task.abort();
@@ -455,6 +619,8 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
 
     Ok(IrohServiceHandle {
         tx: queue,
+        commands: commands_tx,
+        seq,
         stop,
         alive,
         join: Mutex::new(Some(join)),
