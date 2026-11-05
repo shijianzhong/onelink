@@ -5922,6 +5922,7 @@ dependencies = [
  "iroh-mdns-address-lookup",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
