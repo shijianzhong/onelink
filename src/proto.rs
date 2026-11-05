@@ -24,6 +24,22 @@ pub enum Frame {
     },
     /// 对 `Chat` 的送达确认（回带 id）。
     ChatAck { id: u64 },
+    /// 文件传输请求：告知对端有一个文件待接收。
+    FileOffer {
+        xfer_id: u64,
+        name: String,
+        size: u64,
+    },
+    /// 接收方同意接收。
+    FileAccept { xfer_id: u64 },
+    /// 接收方拒绝接收，带原因。
+    FileReject { xfer_id: u64, reason: String },
+    /// 数据流首帧：声明本条流承载哪个传输。
+    FileData { xfer_id: u64 },
+    /// 数据流尾帧：整文件 blake3（hex），供接收方校验。
+    FileDone { xfer_id: u64, hash: String },
+    /// 接收方校验通过。
+    FileAck { xfer_id: u64 },
 }
 
 /// 当前时间戳（毫秒），用于消息排序与展示。

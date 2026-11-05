@@ -5913,6 +5913,7 @@ name = "onelink"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "cocoa 0.26.0",
  "futures-util",
  "gethostname",
