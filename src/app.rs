@@ -155,14 +155,24 @@ impl App {
                 }
                 UiEvent::ChatDelivered { node_id, id } => {
                     tracing::debug!(node_id, id, "chat delivered");
+                    // 送达即清掉当前会话的失败提示（只影响用户正在看的那个会话）。
+                    if self.chat_store.selected() == Some(node_id.as_str()) {
+                        self.chat_panel
+                            .update(cx, |panel, cx| panel.set_error(None, cx));
+                    }
                 }
                 UiEvent::ChatFailed {
                     node_id,
                     id,
                     reason,
                 } => {
-                    // 面板级失败提示留 M3；M2 只落日志，UI 不卡。
                     tracing::warn!(node_id, id, %reason, "chat send failed");
+                    // 只在失败发生在用户正看的会话时提示；后台会话的失败留日志（M3 的会话级标记再说）。
+                    if self.chat_store.selected() == Some(node_id.as_str()) {
+                        let reason = reason.clone();
+                        self.chat_panel
+                            .update(cx, |panel, cx| panel.set_error(Some(reason), cx));
+                    }
                 }
                 other => {
                     self.device_list

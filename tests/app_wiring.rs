@@ -97,3 +97,64 @@ fn sending_appends_to_local_conversation(cx: &mut TestAppContext) {
 
     shutdown_iroh_service(&service);
 }
+
+#[gpui_kit::test]
+fn chat_failure_shows_hint_until_delivery(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, app, service) = open_app(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        seed_device(&app, cx, "n1");
+        window.draw(cx).clear(cx);
+        window.click("device-n1", cx);
+    })
+    .unwrap();
+
+    // 失败事件到达选中的会话 → 面板出现提示
+    cx.update_window(handle.into(), |_, _, cx| {
+        app.update(cx, |app, cx| {
+            app.apply_batch(
+                vec![UiEvent::ChatFailed {
+                    node_id: "n1".into(),
+                    id: 7,
+                    reason: "send timed out after 5s".into(),
+                }],
+                cx,
+            );
+        });
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let hint = window
+            .find("chat-error")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(hint.contains("5s"), "hint was {hint:?}");
+    })
+    .unwrap();
+
+    // 后续送达 → 提示清除
+    cx.update_window(handle.into(), |_, _, cx| {
+        app.update(cx, |app, cx| {
+            app.apply_batch(
+                vec![UiEvent::ChatDelivered {
+                    node_id: "n1".into(),
+                    id: 8,
+                }],
+                cx,
+            );
+        });
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(window.try_find("chat-error").is_none(), "hint should clear");
+    })
+    .unwrap();
+
+    shutdown_iroh_service(&service);
+}

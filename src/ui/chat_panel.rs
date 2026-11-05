@@ -4,10 +4,10 @@
 //! 由 `App` 订阅后投递给 iroh 服务（UI 线程永不阻塞）。
 
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Window, div,
-    prelude::*, px, rgb,
+    App, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Subscription,
+    Window, div, prelude::*, px, rgb,
 };
 
 use crate::chat::ChatMessage;
@@ -25,15 +25,43 @@ pub struct ChatPanel {
     input: Entity<InputState>,
     peer: Option<String>,
     messages: Vec<ChatMessage>,
+    /// 最近一次发送失败的提示（成功发送或送达后清空）。
+    error: Option<String>,
+    /// 输入框回车订阅（Enter 直接发送）。
+    _input_sub: Subscription,
 }
 
 impl ChatPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx));
+        let input_sub = cx.subscribe_in(
+            &input,
+            window,
+            |this, _input, ev: &InputEvent, window, cx| {
+                // 单行输入：Enter 发送，Shift+Enter 不处理（留给将来的多行输入）。
+                if let InputEvent::PressEnter { shift, .. } = ev
+                    && !*shift
+                {
+                    this.send(window, cx);
+                }
+            },
+        );
         Self {
-            input: cx.new(|cx| InputState::new(window, cx)),
+            input,
             peer: None,
             messages: Vec::new(),
+            error: None,
+            _input_sub: input_sub,
         }
+    }
+
+    /// 设置/清除发送失败提示。
+    pub fn set_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        if self.error == error {
+            return;
+        }
+        self.error = error;
+        cx.notify();
     }
 
     /// 切换到某个会话并刷新消息列表（不清输入框内容）。
@@ -55,7 +83,7 @@ impl ChatPanel {
         self.input.read(cx).value().to_string()
     }
 
-    /// 发送：空文本不发；发出后清空输入框。
+    /// 发送：空文本不发；发出后清空输入框与上次的失败提示。
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.peer.is_none() {
             return;
@@ -67,6 +95,7 @@ impl ChatPanel {
         self.input.update(cx, |state, cx| {
             state.set_value(String::new(), window, cx);
         });
+        self.error = None;
         cx.emit(ChatPanelEvent::Send(text));
     }
 }
@@ -117,6 +146,16 @@ impl Render for ChatPanel {
             list = list.child(message_row(msg));
         }
 
+        let error_row = self.error.clone().map(|reason| {
+            div()
+                .id("chat-error")
+                .test_support()
+                .aria_label(reason.clone())
+                .text_size(px(12.))
+                .text_color(rgb(0xD93025))
+                .child(format!("发送失败：{reason}"))
+        });
+
         div()
             .id("chat-panel")
             .test_support()
@@ -135,6 +174,7 @@ impl Render for ChatPanel {
                     .child(header),
             )
             .child(list)
+            .when_some(error_row, |el, row| el.child(row))
             .child(
                 div()
                     .flex()
