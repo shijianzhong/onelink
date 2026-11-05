@@ -1,1 +1,3 @@
-//! UI 组件模块。后续任务的组件（设备列表 `DeviceList` 等）挂载于此。
+//! UI 组件模块。
+
+pub mod device_list;

@@ -15,3 +15,15 @@ serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+
+[dev-dependencies]
+# UI 集成测试需要 gpui-kit 的 test-support（#[gpui_kit::test] / TestWindowExt /
+# ElementSnapshot / .test_support()）。
+gpui-kit = { version = "0.7", features = ["test-support"] }
+
+# gpui-kit 的 test-support 会把可选依赖 gpui-fast-platform 拉进解析，而
+# gpui-fast-macos 0.1.7 精确要求 cocoa =0.26.0、gpui-pre-macos 0.3.9 允许
+# ^0.26.0（默认解析到 0.26.1）——两边无法合并。把 cocoa 钉到 0.26.0 即可同时
+# 满足：gpui-fast 的 =0.26.0，gpui-pre 的 ^0.26.0。
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+cocoa = "=0.26.0"
