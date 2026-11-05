@@ -1,5 +1,5 @@
 use onelink::net::{
-    push_event, translate_mdns_event, EventQueue, MdnsEventLike, UiEvent, ALPN, MDNS_SERVICE,
+    ALPN, EventQueue, MDNS_SERVICE, MdnsEventLike, UiEvent, push_event, translate_mdns_event,
 };
 
 /// 测试用事件：模拟 iroh-mdns-address-lookup 的 DiscoveryEvent。

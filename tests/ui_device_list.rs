@@ -81,7 +81,12 @@ fn apply_events_updates_rows(cx: &mut TestAppContext) {
     // 离线事件到达后重新渲染，状态点变灰
     cx.update_window(handle.into(), |_, _, cx| {
         list.update(cx, |list, cx| {
-            list.apply(UiEvent::DeviceLost { node_id: "n1".into() }, cx);
+            list.apply(
+                UiEvent::DeviceLost {
+                    node_id: "n1".into(),
+                },
+                cx,
+            );
         });
     })
     .unwrap();
@@ -95,7 +100,7 @@ fn apply_events_updates_rows(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn empty_registry_shows_placeholder(cx: &mut TestAppContext) {
-    let (handle, _list) = common::open_window(cx, None, |_, cx| cx.new(|cx| DeviceList::new(cx)));
+    let (handle, _list) = common::open_window(cx, None, |_, cx| cx.new(DeviceList::new));
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.draw(cx).clear(cx);

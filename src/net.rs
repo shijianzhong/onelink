@@ -1,6 +1,7 @@
 //! iroh 服务层与事件桥接：局域网设备发现 + 握手交换设备名 + 有界事件队列。
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,10 +36,18 @@ pub enum HelloMsg {
 /// 网络层 → UI 侧事件。
 #[derive(Debug, Clone)]
 pub enum UiEvent {
-    DeviceDiscovered { node_id: String, addr: Option<String> },
+    DeviceDiscovered {
+        node_id: String,
+        addr: Option<String>,
+    },
     /// 握手完成，拿到对方设备名（注册表更新 name）。
-    DeviceNamed { node_id: String, name: String },
-    DeviceLost { node_id: String },
+    DeviceNamed {
+        node_id: String,
+        name: String,
+    },
+    DeviceLost {
+        node_id: String,
+    },
     NetError(String),
 }
 
@@ -50,6 +59,28 @@ pub struct IrohService {
 /// 服务句柄：`tx` 是 UI 侧可轮询的有界事件队列（`try_recv`）。
 pub struct IrohServiceHandle {
     pub tx: Arc<EventQueue>,
+    /// 置位后服务线程在下一个 100ms 检查点退出并 close endpoint。
+    stop: Arc<AtomicBool>,
+    /// 服务线程是否仍在运行。
+    alive: Arc<AtomicBool>,
+    /// 服务线程 join 句柄（take 后不可重复 join）。
+    join: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl IrohServiceHandle {
+    pub fn is_running(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
+    }
+}
+
+/// 停止服务线程并等待其收尾（close endpoint + runtime 退出）。
+/// 幂等：第二次调用直接返回。
+pub fn shutdown_iroh_service(handle: &IrohServiceHandle) {
+    handle.stop.store(true, Ordering::SeqCst);
+    let join = handle.join.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(join) = join {
+        let _ = join.join();
+    }
 }
 
 /// 有界事件队列：满时丢弃最旧事件（始终保留最新状态）。
@@ -94,13 +125,8 @@ pub trait MdnsEventLike {
 impl MdnsEventLike for DiscoveryEvent {
     fn as_discovered(&self) -> Option<(String, Option<String>)> {
         match self {
-            DiscoveryEvent::Discovered {
-                endpoint_info, ..
-            } => {
-                let addr = endpoint_info
-                    .addrs()
-                    .next()
-                    .map(|a| a.to_string());
+            DiscoveryEvent::Discovered { endpoint_info, .. } => {
+                let addr = endpoint_info.addrs().next().map(|a| a.to_string());
                 Some((endpoint_info.endpoint_id.to_string(), addr))
             }
             DiscoveryEvent::Expired { .. } => None,
@@ -219,7 +245,11 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
     let queue = EventQueue::new(EVENT_QUEUE_CAPACITY);
     let service_queue = Arc::clone(&queue);
     let err_queue = Arc::clone(&queue);
-    std::thread::spawn(move || {
+    let stop = Arc::new(AtomicBool::new(false));
+    let alive = Arc::new(AtomicBool::new(true));
+    let thread_stop = Arc::clone(&stop);
+    let thread_alive = Arc::clone(&alive);
+    let join = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -277,7 +307,8 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
                             let mut attempt = 0;
                             loop {
                                 attempt += 1;
-                                match handshake_name(&ep, EndpointAddr::from(peer_id), &name).await {
+                                match handshake_name(&ep, EndpointAddr::from(peer_id), &name).await
+                                {
                                     Ok(peer_name) => {
                                         push_event(
                                             &q,
@@ -295,9 +326,7 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
                                         tokio::time::sleep(Duration::from_secs(2)).await;
                                     }
                                     Err(e) => {
-                                        tracing::warn!(
-                                            "handshake with {peer_id} failed: {e:#}"
-                                        );
+                                        tracing::warn!("handshake with {peer_id} failed: {e:#}");
                                         break;
                                     }
                                 }
@@ -308,17 +337,44 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
                 tracing::info!("mdns event stream ended");
             });
 
-            // 服务线程随任一任务结束而收尾（正常退出路径由 Task 7 的 close 触发）。
+            // 服务线程随任一任务结束或 stop 信号而收尾：close endpoint 让
+            // 对端尽快看到节点下线，再退出 runtime。
+            let mut mdns_task = mdns_task;
+            let mut serve_task = serve_task;
             tokio::select! {
-                r = mdns_task => tracing::info!("mdns task ended: {r:?}"),
-                r = serve_task => tracing::info!("serve task ended: {r:?}"),
+                r = &mut mdns_task => tracing::info!("mdns task ended: {r:?}"),
+                r = &mut serve_task => tracing::info!("serve task ended: {r:?}"),
+                _ = wait_for_stop(Arc::clone(&thread_stop)) => tracing::info!("stop requested"),
             }
+            mdns_task.abort();
+            serve_task.abort();
+            // close 要等 relay/QUIC 收尾，正常网络下 <300ms，但弱网可能久；
+            // 退出路径不为此卡住 UI，超时就交给 runtime 限时关闭。
+            let closed = tokio::time::timeout(Duration::from_millis(800), endpoint.close()).await;
+            tracing::info!(?closed, "endpoint close attempted, service thread exiting");
             Ok::<(), anyhow::Error>(())
         });
         if let Err(e) = result {
-            let _ = err_queue.push(UiEvent::NetError(format!("service error: {e:#}")));
+            err_queue.push(UiEvent::NetError(format!("service error: {e:#}")));
         }
+        rt.shutdown_timeout(Duration::from_millis(500));
+        thread_alive.store(false, Ordering::SeqCst);
     });
 
-    Ok(IrohServiceHandle { tx: queue })
+    Ok(IrohServiceHandle {
+        tx: queue,
+        stop,
+        alive,
+        join: Mutex::new(Some(join)),
+    })
+}
+
+/// 每 100ms 检查一次停止标志（nimble 退出，不打断 in-flight 任务）。
+async fn wait_for_stop(stop: Arc<AtomicBool>) {
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

@@ -1,5 +1,5 @@
-use onelink::model::{apply_ui_event, DeviceRegistry};
-use onelink::net::{handshake_name, serve_handshake, HelloMsg, UiEvent};
+use onelink::model::{DeviceRegistry, apply_ui_event};
+use onelink::net::{HelloMsg, UiEvent, handshake_name, serve_handshake};
 
 #[test]
 fn hello_msg_roundtrips_json() {
@@ -38,7 +38,12 @@ fn lost_event_marks_device_offline_not_removed() {
             name: "云主机".into(),
         },
     );
-    apply_ui_event(&mut reg, UiEvent::DeviceLost { node_id: "n1".into() });
+    apply_ui_event(
+        &mut reg,
+        UiEvent::DeviceLost {
+            node_id: "n1".into(),
+        },
+    );
     let snap = reg.snapshot();
     assert_eq!(snap.len(), 1);
     assert!(!snap[0].online);

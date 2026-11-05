@@ -26,6 +26,12 @@ pub struct DeviceRegistry {
     devices: BTreeMap<String, DeviceInfo>,
 }
 
+impl Default for DeviceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeviceRegistry {
     pub fn new() -> Self {
         Self {
@@ -88,7 +94,10 @@ fn placeholder_name(node_id: &str) -> String {
 }
 
 /// 把一条网络事件应用到注册表，返回产生的变更列表（UI 侧直接消费）。
-pub fn apply_ui_event(registry: &mut DeviceRegistry, event: crate::net::UiEvent) -> Vec<DeviceChange> {
+pub fn apply_ui_event(
+    registry: &mut DeviceRegistry,
+    event: crate::net::UiEvent,
+) -> Vec<DeviceChange> {
     use crate::net::UiEvent;
 
     match event {

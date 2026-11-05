@@ -20,29 +20,27 @@ pub struct App {
 
 impl App {
     pub fn new(cx: &mut Context<Self>, events: Arc<EventQueue>) -> Self {
-        let device_list = cx.new(|cx| DeviceList::new(cx));
+        let device_list = cx.new(DeviceList::new);
 
         let pump_events = Arc::clone(&events);
-        cx.spawn(
-            async move |this: WeakEntity<App>, cx: &mut AsyncApp| {
-                loop {
-                    cx.background_executor().timer(PUMP_INTERVAL).await;
-                    let mut batch = Vec::new();
-                    while let Some(ev) = pump_events.try_recv() {
-                        batch.push(ev);
-                    }
-                    if batch.is_empty() {
-                        continue;
-                    }
-                    if this
-                        .update(cx, |app, cx| app.apply_batch(batch, cx))
-                        .is_err()
-                    {
-                        break;
-                    }
+        cx.spawn(async move |this: WeakEntity<App>, cx: &mut AsyncApp| {
+            loop {
+                cx.background_executor().timer(PUMP_INTERVAL).await;
+                let mut batch = Vec::new();
+                while let Some(ev) = pump_events.try_recv() {
+                    batch.push(ev);
                 }
-            },
-        )
+                if batch.is_empty() {
+                    continue;
+                }
+                if this
+                    .update(cx, |app, cx| app.apply_batch(batch, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
         .detach();
 
         Self { device_list }
@@ -64,7 +62,8 @@ impl Render for App {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
-            .flex().flex_col()
+            .flex()
+            .flex_col()
             .child(
                 div()
                     .px(px(16.))

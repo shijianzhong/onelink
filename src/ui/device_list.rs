@@ -53,7 +53,8 @@ impl Render for DeviceList {
             return div()
                 .id("device-list")
                 .test_support()
-                .flex().flex_col()
+                .flex()
+                .flex_col()
                 .p(px(16.))
                 .child(
                     div()
@@ -68,7 +69,8 @@ impl Render for DeviceList {
         div()
             .id("device-list")
             .test_support()
-            .flex().flex_col()
+            .flex()
+            .flex_col()
             .gap(px(4.))
             .p(px(12.))
             .children(devices.into_iter().map(|d| {
