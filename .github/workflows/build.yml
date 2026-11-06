@@ -1,0 +1,120 @@
+name: Build packages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # 与本地开发一致的 nightly（gpui-pre 依赖 nightly 特性，避免最新 nightly 回归）。
+  RUSTUP_TOOLCHAIN: nightly-2026-11-03
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+          - name: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 构建不需要窗口系统，只需 GPUI 的 X11 / Wayland / 字体编译期头文件。
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev \
+            libx11-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libfontconfig1-dev libgl1-mesa-dev
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+
+      - name: Show toolchain
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin onelink --target ${{ matrix.target }}
+
+      - name: Package macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/onelink"
+          app="dist/stage/OneLink.app"
+          mkdir -p "$app/Contents/MacOS"
+          cp "$bin" "$app/Contents/MacOS/onelink"
+          cat > "$app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>OneLink</string>
+            <key>CFBundleDisplayName</key><string>OneLink</string>
+            <key>CFBundleIdentifier</key><string>dev.onelink.app</string>
+            <key>CFBundleVersion</key><string>0.1.0</string>
+            <key>CFBundleShortVersionString</key><string>0.1.0</string>
+            <key>CFBundleExecutable</key><string>onelink</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          cp README.md dist/stage/README.md
+          ditto -c -k --sequesterRsrc "dist/stage" "dist/OneLink-${{ matrix.name }}.zip"
+
+      - name: Package Windows zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/onelink.exe" dist/onelink.exe
+          Copy-Item README.md dist/README.md
+          Compress-Archive -Path dist/onelink.exe, dist/README.md -DestinationPath "dist/OneLink-${{ matrix.name }}.zip"
+
+      - name: Package Linux tarball
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/onelink" dist/onelink
+          cp README.md dist/README.md
+          tar -C dist -czf "dist/OneLink-${{ matrix.name }}.tar.gz" onelink README.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OneLink-${{ matrix.name }}
+          path: |
+            dist/OneLink-*.zip
+            dist/OneLink-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
