@@ -23,7 +23,7 @@ jobs:
       matrix:
         include:
           - name: macos-arm64
-            os: macos-14
+            os: macos-latest
             target: aarch64-apple-darwin
           - name: macos-x86_64
             os: macos-15-intel
@@ -52,7 +52,9 @@ jobs:
             libfontconfig1-dev libgl1-mesa-dev
 
       - name: Install nightly toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+        # 不用 $RUSTUP_TOOLCHAIN：PowerShell 里它只是未定义的 PS 变量（需 $env: 前缀），
+        # 会导致 windows 上展开为空串。环境变量本身仍供 cargo 选择工具链。
+        run: rustup toolchain install nightly-2026-11-03 --profile minimal
 
       - name: Show toolchain
         run: rustc --version && cargo --version
