@@ -3,10 +3,11 @@ name: Build packages
 on:
   push:
     branches: [master]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -120,3 +121,45 @@ jobs:
             dist/OneLink-*.tar.gz
           if-no-files-found: error
           retention-days: 14
+
+  # 仅 tag（v*）发布；master 的普通 push 只上传 Artifacts，不进 Release。
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Show release assets
+        run: ls -lh artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: OneLink ${{ github.ref_name }}
+          files: |
+            artifacts/*.zip
+            artifacts/*.tar.gz
+          body: |
+            局域网点对点聊天 / 文件互传桌面客户端（聊天 + 文件传输 + 拖拽发送）。
+
+            | 平台 | 资产 |
+            | --- | --- |
+            | macOS arm64 | `OneLink-macos-arm64.zip`（`OneLink.app`） |
+            | macOS x86_64 | `OneLink-macos-x86_64.zip`（`OneLink.app`） |
+            | Windows x86_64 | `OneLink-windows-x86_64.zip`（`onelink.exe`） |
+            | Linux x86_64 | `OneLink-linux-x86_64.tar.gz`（`onelink`） |
+
+            已知限制：
+
+            - **macOS 包未签名、未公证**：首次运行需在 Finder 里右键「打开」，或执行
+              `xattr -d com.apple.quarantine OneLink.app`；否则 Gatekeeper 会拦截。
+            - **Windows 只有未签名 zip，没有 MSI/NSIS 安装器**：解压后直接运行
+              `onelink.exe`，SmartScreen 可能提示未知发布者。
+            - Linux 运行需要系统内可用的 X11/Wayland 与图形驱动。
+
