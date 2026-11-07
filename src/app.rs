@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui_kit::base::TestSupportExt;
 use gpui_kit::{
-    AsyncApp, Context, Entity, IntoElement, ParentElement, PathPromptOptions, Render, Styled,
-    Subscription, WeakEntity, Window, div, prelude::*, px, rgb,
+    AsyncApp, Context, Entity, FontWeight, IntoElement, ParentElement, PathPromptOptions, Render,
+    Styled, Subscription, WeakEntity, Window, div, prelude::*, px, rgb,
 };
 
 use crate::chat::{ChatMessage, ChatStore};
@@ -15,6 +16,7 @@ use crate::net::{IrohServiceHandle, UiEvent};
 use crate::proto::now_ms;
 use crate::ui::chat_panel::{ChatPanel, ChatPanelEvent};
 use crate::ui::device_list::{DeviceList, DeviceListEvent};
+use crate::ui::theme::{color, size, space, text};
 use crate::ui::transfer_row::{TransferState, TransferView};
 
 /// 事件泵轮询间隔。
@@ -353,37 +355,61 @@ impl App {
 impl Render for App {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .id("app-root")
+            .test_support()
             .size_full()
             .flex()
-            .flex_col()
+            .flex_row()
+            .bg(rgb(color::BG))
             .child(
+                // 左侧栏：品牌头 + 设备列表；与聊天区用 1px 分隔线区分，不再靠边框卡片。
                 div()
-                    .px(px(16.))
-                    .py(px(10.))
-                    .text_size(px(16.))
-                    .child("OneLink"),
-            )
-            .child(
-                div()
+                    .id("app-sidebar")
+                    .test_support()
+                    .w(px(size::SIDEBAR_W))
                     .flex()
-                    .flex_1()
-                    .min_h(px(0.))
+                    .flex_col()
+                    .bg(rgb(color::SIDEBAR))
+                    .border_r_1()
+                    .border_color(rgb(color::DIVIDER))
                     .child(
                         div()
-                            .w(px(280.))
                             .flex()
                             .flex_col()
-                            .bg(rgb(0xF7F8F9))
-                            .child(self.device_list.clone()),
+                            .gap(px(2.))
+                            .px(px(space::S3))
+                            .py(px(space::S3))
+                            .border_b_1()
+                            .border_color(rgb(color::DIVIDER))
+                            .child(
+                                div()
+                                    .text_size(px(text::BRAND))
+                                    .text_color(rgb(color::TEXT))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("OneLink"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(text::CAPTION))
+                                    .text_color(rgb(color::TEXT_MUTED))
+                                    .child("局域网直连 · 无需服务器"),
+                            ),
                     )
                     .child(
                         div()
                             .flex()
-                            .flex_col()
                             .flex_1()
-                            .min_w(px(0.))
-                            .child(self.chat_panel.clone()),
+                            .min_h(px(0.))
+                            .child(self.device_list.clone()),
                     ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(self.chat_panel.clone()),
             )
     }
 }

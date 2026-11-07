@@ -2,4 +2,5 @@
 
 pub mod chat_panel;
 pub mod device_list;
+pub mod theme;
 pub mod transfer_row;

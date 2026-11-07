@@ -4,9 +4,12 @@
 //! 由 `App` 订阅后投递给 iroh 服务（UI 线程永不阻塞）。
 
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::{Context, IntoElement, ParentElement, Styled, div, prelude::*, px, relative, rgb};
+use gpui_kit::{
+    Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px, relative, rgb,
+};
 
 use crate::ui::chat_panel::{ChatPanel, ChatPanelEvent};
+use crate::ui::theme::{color, radius, space, text};
 
 /// 单条传输在 UI 上的状态。
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +48,7 @@ fn format_size(size: u64) -> String {
     }
 }
 
+/// 卡片内的操作按钮：接受用强调绿，拒绝用中性灰。
 fn action_button(
     id: String,
     label: &'static str,
@@ -56,20 +60,30 @@ fn action_button(
         .id(id)
         .test_support()
         .aria_label(label)
-        .px(px(8.))
-        .py(px(2.))
-        .rounded(px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(px(space::S3))
+        .py(px(5.))
+        .rounded(px(radius::SM))
+        .text_size(px(text::BODY))
         .bg(if primary {
-            rgb(0x1A73E8)
+            rgb(color::ACCENT)
         } else {
-            rgb(0xF1F3F4)
+            rgb(color::BG)
         })
         .text_color(if primary {
-            rgb(0xFFFFFF)
+            rgb(color::SURFACE)
         } else {
-            rgb(0x444444)
+            rgb(color::TEXT_SECONDARY)
         })
-        .text_size(px(12.))
+        .hover(|button| {
+            button.bg(if primary {
+                rgb(color::ACCENT)
+            } else {
+                rgb(color::HOVER)
+            })
+        })
         .child(label)
         .on_click(cx.listener(move |_this, _ev, _window, cx| {
             cx.emit(event.clone());
@@ -80,11 +94,14 @@ fn action_button(
 pub fn render(view: &TransferView, cx: &mut Context<ChatPanel>) -> impl IntoElement {
     let id = view.xfer_id;
     let (state_text, state_color) = match &view.state {
-        TransferState::Waiting => ("等待对方接受…".to_string(), 0x999999),
-        TransferState::Active(_) => ("传输中".to_string(), 0x444444),
-        TransferState::Done => ("完成".to_string(), 0x2E7D32),
-        TransferState::Failed(reason) => (format!("失败：{reason}"), 0xD93025),
-        TransferState::Offer { size } => (format!("待接收 · {}", format_size(*size)), 0x444444),
+        TransferState::Waiting => ("等待对方接受…".to_string(), color::TEXT_MUTED),
+        TransferState::Active(_) => ("传输中".to_string(), color::TEXT_SECONDARY),
+        TransferState::Done => ("完成".to_string(), color::ACCENT),
+        TransferState::Failed(reason) => (format!("失败：{reason}"), color::DANGER),
+        TransferState::Offer { size } => (
+            format!("待接收 · {}", format_size(*size)),
+            color::TEXT_SECONDARY,
+        ),
     };
 
     let mut row = div()
@@ -92,23 +109,32 @@ pub fn render(view: &TransferView, cx: &mut Context<ChatPanel>) -> impl IntoElem
         .test_support()
         .flex()
         .flex_col()
-        .gap(px(4.))
-        .px(px(8.))
-        .py(px(6.))
-        .rounded(px(6.))
-        .bg(rgb(0xF7F8F9))
+        .gap(px(space::S2))
+        .p(px(space::S3))
+        .rounded(px(radius::LG))
+        .bg(rgb(color::SURFACE))
+        .border_1()
+        .border_color(rgb(color::DIVIDER))
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(8.))
-                .child(div().text_size(px(12.)).child(view.name.clone()))
+                .gap(px(space::S2))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_size(px(text::BODY))
+                        .text_color(rgb(color::TEXT))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(view.name.clone()),
+                )
                 .child(
                     div()
                         .id(format!("xfer-state-{id}"))
                         .test_support()
                         .aria_label(state_text.clone())
-                        .text_size(px(12.))
+                        .text_size(px(text::CAPTION))
                         .text_color(rgb(state_color))
                         .child(state_text),
                 )
@@ -136,19 +162,19 @@ pub fn render(view: &TransferView, cx: &mut Context<ChatPanel>) -> impl IntoElem
             div()
                 .flex()
                 .items_center()
-                .gap(px(6.))
+                .gap(px(space::S2))
                 .child(
                     div()
                         .flex_1()
-                        .h(px(4.))
-                        .rounded(px(2.))
-                        .bg(rgb(0xE8EAED))
+                        .h(px(6.))
+                        .rounded(px(3.))
+                        .bg(rgb(color::TRACK))
                         .child(
                             div()
                                 .h_full()
                                 .w(relative(fraction.clamp(0.0, 1.0)))
-                                .rounded(px(2.))
-                                .bg(rgb(0x1A73E8)),
+                                .rounded(px(3.))
+                                .bg(rgb(color::ACCENT)),
                         ),
                 )
                 .child(
@@ -156,8 +182,8 @@ pub fn render(view: &TransferView, cx: &mut Context<ChatPanel>) -> impl IntoElem
                         .id(format!("xfer-progress-{id}"))
                         .test_support()
                         .aria_label(text.clone())
-                        .text_size(px(11.))
-                        .text_color(rgb(0x666666))
+                        .text_size(px(text::CAPTION))
+                        .text_color(rgb(color::TEXT_SECONDARY))
                         .child(text),
                 ),
         );

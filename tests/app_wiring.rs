@@ -317,3 +317,21 @@ fn progress_and_completion_update_row(cx: &mut TestAppContext) {
 
     shutdown_iroh_service(&service);
 }
+
+/// 布局回归：侧栏固定 300px，聊天区占满剩余宽度（UI 断言，不依赖截图）。
+#[gpui_kit::test]
+fn sidebar_uses_fixed_im_width(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, _app, service) = open_app(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let sidebar = window.find("app-sidebar").bounds();
+        assert_eq!(f32::from(sidebar.size.width), 300.);
+        let root = window.find("app-root").bounds();
+        assert!(f32::from(root.size.width) > 300., "root {root:?}");
+    })
+    .unwrap();
+
+    shutdown_iroh_service(&service);
+}
