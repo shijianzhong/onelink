@@ -167,3 +167,73 @@ fn clicking_device_row_emits_selected(cx: &mut TestAppContext) {
         vec![DeviceListEvent::Selected("n1".into())]
     );
 }
+
+/// 回归：行宽由侧栏决定，与用户名长度无关（短名/长名/带未读角标都一样）。
+#[gpui_kit::test]
+fn rows_fill_sidebar_regardless_of_name_length(cx: &mut TestAppContext) {
+    let (handle, _host) = common::open_window(cx, None, |_, cx| {
+        cx.new(|cx| {
+            let list = cx.new(|cx| {
+                let mut list = DeviceList::new(cx);
+                let now = SystemTime::now();
+                list.registry_mut().upsert(DeviceInfo {
+                    node_id: "short".into(),
+                    name: "云主机".into(),
+                    addr: None,
+                    online: true,
+                    last_seen: now,
+                });
+                list.registry_mut().upsert(DeviceInfo {
+                    node_id: "long".into(),
+                    name: "客厅那台非常非常长的设备名称用来验证省略号截断".into(),
+                    addr: None,
+                    online: false,
+                    last_seen: now,
+                });
+                list.set_unread("long", 12, cx);
+                list
+            });
+            // 复刻生产布局：300px 侧栏内的列方向 flex 容器。
+            SidebarHost { list }
+        })
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let short = window.find("device-short").bounds();
+        let long = window.find("device-long").bounds();
+        assert_eq!(
+            f32::from(short.size.width),
+            f32::from(long.size.width),
+            "短名 {short:?} / 长名 {long:?} 行宽应一致"
+        );
+        // 300px 侧栏 - 列表左右各 8px 内边距 = 284px。
+        assert_eq!(f32::from(short.size.width), 284.);
+        assert_eq!(f32::from(long.size.height), 64.);
+    })
+    .unwrap();
+}
+
+/// 复刻生产的侧栏容器：固定 300px + 列方向 flex，子项应横向拉伸。
+struct SidebarHost {
+    list: Entity<DeviceList>,
+}
+
+impl Render for SidebarHost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(gpui_kit::px(300.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .w_full()
+                    .min_h(gpui_kit::px(0.))
+                    .child(self.list.clone()),
+            )
+    }
+}

@@ -106,6 +106,8 @@ fn device_row(
         // aria 文本保持旧格式（状态点 + 名字），测试与无障碍语义不变。
         .aria_label(format!("{dot} {}", device.name))
         .flex()
+        // 行宽由侧栏决定，不随名字长度收缩：显式占满列表可用宽度。
+        .w_full()
         .items_center()
         .gap(px(space::S3))
         .h(px(size::DEVICE_ROW_H))
@@ -141,13 +143,24 @@ fn device_row(
                         .items_center()
                         .gap(px(space::S1))
                         .child(
+                            // 名字吃掉剩余宽度；过长时省略号截断，不撑开布局。
                             div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .whitespace_nowrap()
+                                .text_ellipsis()
                                 .text_size(px(text::MESSAGE))
                                 .text_color(rgb(color::TEXT))
                                 .child(device.name.clone()),
                         )
-                        // 在线状态：绿点在线、灰点离线（保留原语义）。
-                        .child(div().text_size(px(9.)).text_color(dot_color).child(dot)),
+                        // 在线状态：绿点在线、灰点离线（保留原语义），不参与宽度竞争。
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(9.))
+                                .text_color(dot_color)
+                                .child(dot),
+                        ),
                 )
                 .child(
                     div()
@@ -167,6 +180,7 @@ fn device_row(
                     .justify_center()
                     .min_w(px(18.))
                     .h(px(18.))
+                    .flex_shrink_0()
                     .px(px(5.))
                     .rounded(px(9.))
                     .bg(rgb(color::UNREAD))
@@ -192,6 +206,7 @@ impl Render for DeviceList {
                 .test_support()
                 .flex()
                 .flex_col()
+                .w_full()
                 .items_center()
                 .gap(px(space::S1))
                 .p(px(space::S6))
@@ -217,6 +232,8 @@ impl Render for DeviceList {
             .test_support()
             .flex()
             .flex_col()
+            // 列表铺满侧栏；行内再用 w_full 撑满扣掉内边距后的可用宽度。
+            .w_full()
             .gap(px(2.))
             .p(px(space::S2))
             .children(devices.iter().map(|d| {

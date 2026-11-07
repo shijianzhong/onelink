@@ -396,9 +396,12 @@ impl Render for App {
                             ),
                     )
                     .child(
+                        // 列方向 flex：子项按容器宽度拉伸，避免设备列表收缩到内容宽度。
                         div()
                             .flex()
+                            .flex_col()
                             .flex_1()
+                            .w_full()
                             .min_h(px(0.))
                             .child(self.device_list.clone()),
                     ),
