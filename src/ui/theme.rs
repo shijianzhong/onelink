@@ -22,6 +22,8 @@ pub mod color {
     pub const BUBBLE_PEER_BORDER: u32 = 0xE6E6E6;
     /// 主操作色：在线状态点、发送按钮、传输进度条。
     pub const ACCENT: u32 = 0x07C160;
+    /// 输入框聚焦描边（微信绿 40% 叠白）：能感知聚焦，但不抢眼。
+    pub const FOCUS_BORDER: u32 = 0x9CE6BF;
     /// 主文字。
     pub const TEXT: u32 = 0x1A1A1A;
     /// 次级文字（状态、副标题）。
@@ -70,6 +72,12 @@ pub mod text {
 
 /// 关键尺寸。
 pub mod size {
+    /// 主窗口默认宽高（对齐主流 IM 的紧凑窗口，而非 GPUI 默认的 1536×1095）。
+    pub const WINDOW_W: f32 = 960.;
+    pub const WINDOW_H: f32 = 680.;
+    /// 窗口最小宽高：再小聊天区就会被侧栏和气泡最大宽度挤扁。
+    pub const WINDOW_MIN_W: f32 = 860.;
+    pub const WINDOW_MIN_H: f32 = 600.;
     /// 左侧栏宽度。
     pub const SIDEBAR_W: f32 = 300.;
     /// 气泡最大宽度（约为聊天区常见宽度的 60%）。

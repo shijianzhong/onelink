@@ -342,7 +342,7 @@ impl Render for ChatPanel {
             .when_some(transfers, |el, block| el.child(block))
             .when_some(error_row, |el, row| el.child(row))
             .child(
-                // 输入卡片：白底、圆角、聚焦时 1px 强调描边（参考 rune 的 focus ring）。
+                // 输入卡片：白底、圆角；聚焦只把描边从灰换成淡绿，避免整圈高饱和边框。
                 div()
                     .id("chat-composer")
                     .test_support()
@@ -356,7 +356,7 @@ impl Render for ChatPanel {
                     .bg(rgb(color::SURFACE))
                     .border_1()
                     .border_color(rgb(if self.input_focused {
-                        color::ACCENT
+                        color::FOCUS_BORDER
                     } else {
                         color::DIVIDER
                     }))
