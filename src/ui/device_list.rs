@@ -6,9 +6,10 @@
 use std::collections::BTreeMap;
 
 use gpui_kit::base::TestSupportExt;
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::{
-    Context, EventEmitter, FontWeight, IntoElement, ParentElement, Render, Styled, Window, div,
-    prelude::*, px, rgb,
+    Context, Entity, EventEmitter, FontWeight, IntoElement, KeyDownEvent, ParentElement, Render,
+    Styled, Subscription, Window, div, prelude::*, px, rgb,
 };
 
 use crate::model::{DeviceInfo, DeviceRegistry, apply_ui_event};
@@ -20,6 +21,13 @@ use crate::ui::theme::{color, radius, size, space, text};
 pub enum DeviceListEvent {
     /// 用户点了某台设备行（payload 是 node id）。
     Selected(String),
+    /// 用户提交了备注；`alias: None` 表示清空备注（回落到握手名）。
+    AliasSubmitted {
+        node_id: String,
+        alias: Option<String>,
+    },
+    /// 用户取消了备注编辑（不写库）。
+    AliasCancelled,
 }
 
 impl EventEmitter<DeviceListEvent> for DeviceList {}
@@ -29,6 +37,12 @@ pub struct DeviceList {
     selected: Option<String>,
     /// 各 peer 的未读数（由 `App` 从 `ChatStore` 同步过来，组件自己不算）。
     unread: BTreeMap<String, u32>,
+    /// 正在改备注的 node id（行内编辑态）。
+    editing: Option<String>,
+    /// 行内编辑框；与 `editing` 同时存在。
+    alias_input: Option<Entity<TextareaState>>,
+    /// 编辑框事件订阅（Enter 提交）；退出编辑即 drop。
+    _alias_sub: Option<Subscription>,
 }
 
 impl DeviceList {
@@ -37,6 +51,9 @@ impl DeviceList {
             registry: DeviceRegistry::new(),
             selected: None,
             unread: BTreeMap::new(),
+            editing: None,
+            alias_input: None,
+            _alias_sub: None,
         }
     }
 
@@ -90,6 +107,63 @@ impl DeviceList {
         cx.notify();
         cx.emit(DeviceListEvent::Selected(node_id));
     }
+
+    /// 进入某台设备的行内备注编辑（预填当前备注并聚焦）。
+    pub fn begin_alias_edit(&mut self, node_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self
+            .registry
+            .get(node_id)
+            .and_then(|d| d.alias.clone())
+            .unwrap_or_default();
+        let input = cx.new(|cx| TextareaState::new(window, cx).submit_on_enter(true));
+        input.update(cx, |state, cx| {
+            state.set_value(current, window, cx);
+            state.set_placeholder("留空恢复原名", window, cx);
+            state.focus(window, cx);
+        });
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            |this, _input, ev: &InputEvent, _window, cx| {
+                if let InputEvent::PressEnter { shift, .. } = ev
+                    && !*shift
+                {
+                    this.commit_alias_edit(cx);
+                }
+            },
+        );
+        self.editing = Some(node_id.to_string());
+        self.alias_input = Some(input);
+        self._alias_sub = Some(sub);
+        cx.notify();
+    }
+
+    /// 提交备注：空白串按清空处理；先更新内存显示，再抛事件让 `App` 落库。
+    pub fn commit_alias_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(node_id) = self.editing.take() else {
+            return;
+        };
+        let Some(input) = self.alias_input.take() else {
+            return;
+        };
+        let text = input.read(cx).value().to_string();
+        let alias = Some(text.trim().to_string()).filter(|a| !a.is_empty());
+        self._alias_sub = None;
+        self.registry.set_alias(&node_id, alias.clone());
+        cx.notify();
+        cx.emit(DeviceListEvent::AliasSubmitted { node_id, alias });
+    }
+
+    /// 取消编辑：丢掉输入，不写库。
+    pub fn cancel_alias_edit(&mut self, cx: &mut Context<Self>) {
+        if self.editing.take().is_none() {
+            return;
+        }
+        self.alias_input = None;
+        self._alias_sub = None;
+        cx.notify();
+        cx.emit(DeviceListEvent::AliasCancelled);
+    }
 }
 
 /// 一行设备：头像（名字首字）+ 名字/短 id + 未读角标。
@@ -100,8 +174,9 @@ fn device_row(
     cx: &mut Context<DeviceList>,
 ) -> gpui_kit::AnyElement {
     let device_id = device.node_id.clone();
+    let edit_id = device.node_id.clone();
     let initial = device
-        .name
+        .display_name()
         .chars()
         .next()
         .map(|c| c.to_string())
@@ -183,6 +258,24 @@ fn device_row(
                         .child(short),
                 ),
         )
+        // 行内次要操作：改本地备注（点击不冒泡成"选中会话"）。
+        .child(
+            div()
+                .id(format!("alias-edit-{edit_id}"))
+                .test_support()
+                .aria_label("改备注")
+                .flex_shrink_0()
+                .px(px(space::S1))
+                .rounded(px(radius::SM))
+                .text_size(px(text::CAPTION))
+                .text_color(rgb(color::TEXT_MUTED))
+                .hover(|el| el.text_color(rgb(color::TEXT_SECONDARY)))
+                .child("备注")
+                .on_click(cx.listener(move |this, _ev, window, cx| {
+                    cx.stop_propagation();
+                    this.begin_alias_edit(&edit_id, window, cx);
+                })),
+        )
         .when(unread > 0, |row| {
             row.child(
                 div()
@@ -210,9 +303,88 @@ fn device_row(
         .into_any_element()
 }
 
+/// 行内备注编辑：焦点描边沿用输入框的淡绿 token；Enter 提交、Esc 取消。
+fn alias_editor_row(
+    node_id: &str,
+    input: &Entity<TextareaState>,
+    cx: &mut Context<DeviceList>,
+) -> gpui_kit::AnyElement {
+    let action = |id: String, label: &'static str, accent: bool| {
+        div()
+            .id(id)
+            .test_support()
+            .aria_label(label)
+            .flex_shrink_0()
+            .px(px(space::S1))
+            .rounded(px(radius::SM))
+            .text_size(px(text::CAPTION))
+            .text_color(rgb(if accent {
+                color::ACCENT
+            } else {
+                color::TEXT_MUTED
+            }))
+            .child(label)
+    };
+
+    div()
+        .id(format!("alias-editor-{node_id}"))
+        .test_support()
+        .flex()
+        .w_full()
+        .items_center()
+        .gap(px(space::S2))
+        .h(px(size::DEVICE_ROW_H))
+        .px(px(space::S2))
+        .rounded(px(radius::MD))
+        .bg(rgb(color::HOVER))
+        .child(
+            div()
+                .id(format!("alias-input-{node_id}"))
+                .test_support()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .flex_1()
+                .min_w(px(0.))
+                .h(px(30.))
+                .px(px(space::S2))
+                .rounded(px(radius::SM))
+                .bg(rgb(color::SURFACE))
+                .border_1()
+                .border_color(rgb(color::FOCUS_BORDER))
+                .child(Textarea::new(input).h(px(26.)).text_size(px(text::CAPTION))),
+        )
+        .child(
+            action(format!("alias-save-{node_id}"), "保存", true).on_click(cx.listener(
+                |this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                    this.commit_alias_edit(cx);
+                },
+            )),
+        )
+        .child(
+            action(format!("alias-cancel-{node_id}"), "取消", false).on_click(cx.listener(
+                |this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                    this.cancel_alias_edit(cx);
+                },
+            )),
+        )
+        .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+            if ev.keystroke.key == "escape" {
+                this.cancel_alias_edit(cx);
+            }
+        }))
+        .into_any_element()
+}
+
 impl Render for DeviceList {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let devices = self.registry.snapshot();
+        let editing = self.editing.clone();
+        let alias_input = self.alias_input.clone();
+        let unread_all = self.unread.clone();
+        let selected = self.selected.clone();
 
         if devices.is_empty() {
             return div()
@@ -251,9 +423,14 @@ impl Render for DeviceList {
             .gap(px(2.))
             .p(px(space::S2))
             .children(devices.iter().map(|d| {
-                let selected = self.selected.as_deref() == Some(d.node_id.as_str());
-                let unread = self.unread.get(&d.node_id).copied().unwrap_or(0);
-                device_row(d, selected, unread, cx)
+                if editing.as_deref() == Some(d.node_id.as_str())
+                    && let Some(input) = &alias_input
+                {
+                    return alias_editor_row(&d.node_id, input, cx);
+                }
+                let is_selected = selected.as_deref() == Some(d.node_id.as_str());
+                let unread = unread_all.get(&d.node_id).copied().unwrap_or(0);
+                device_row(d, is_selected, unread, cx)
             }))
     }
 }

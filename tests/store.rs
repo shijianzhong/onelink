@@ -29,6 +29,53 @@ fn message(id: u64, text: &str, mine: bool, status: MessageStatus) -> ChatMessag
 }
 
 #[test]
+fn nickname_persists_and_blank_means_default_on_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("onelink.db");
+
+    {
+        let (store, _) = Store::open(&path);
+        store.set_self_nickname("阿钟");
+    }
+    let (store, loaded) = Store::open(&path);
+    assert_eq!(loaded.self_nickname.as_deref(), Some("阿钟"));
+
+    // 清空昵称 = 使用默认名；重启后应归一成 None。
+    store.set_self_nickname("   ");
+    drop(store);
+    let (_, loaded) = Store::open(&path);
+    assert!(loaded.self_nickname.is_none());
+}
+
+#[test]
+fn alias_change_and_clear_survive_reopen_and_fall_back_to_remote_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("onelink.db");
+
+    {
+        let (store, _) = Store::open(&path);
+        store.upsert_device(&device("n1", "书房Mac"));
+        store.set_alias("n1", Some("客厅机器"));
+    }
+
+    // 重启：备注仍在，显示名用备注；握手名没被覆盖。
+    let (store, loaded) = Store::open(&path);
+    assert_eq!(loaded.devices.len(), 1);
+    let saved = &loaded.devices[0];
+    assert_eq!(saved.name, "书房Mac");
+    assert_eq!(saved.alias.as_deref(), Some("客厅机器"));
+    assert_eq!(saved.display_name(), "客厅机器");
+
+    // 清空备注：回落到握手名，且重启后仍是"无备注"。
+    store.set_alias("n1", None);
+    drop(store);
+    let (_, loaded) = Store::open(&path);
+    let saved = &loaded.devices[0];
+    assert!(saved.alias.is_none());
+    assert_eq!(saved.display_name(), "书房Mac");
+}
+
+#[test]
 fn messages_persist_and_hydrate_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("onelink.db");

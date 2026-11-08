@@ -91,6 +91,42 @@ fn named_event_keeps_addr_from_discovery() {
 }
 
 #[tokio::test]
+async fn runtime_nickname_is_sent_in_next_handshake() {
+    use iroh::endpoint::presets;
+    use onelink::net::{
+        ALPN, handshake_name, local_device_name, shutdown_iroh_service,
+        spawn_iroh_service_with_name,
+    };
+
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+
+    let service = spawn_iroh_service_with_name("初始名".into()).expect("spawn service");
+    let addr = service.addr.clone();
+    assert_eq!(service.own_name(), "初始名");
+
+    // 运行期改名：下一次握手的 HelloAck 就应该是新名字。
+    service.set_own_name("改名后");
+
+    let client = iroh::Endpoint::builder(presets::Minimal)
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await
+        .unwrap();
+    let got = handshake_name(&client, addr, "客户端").await.unwrap();
+    assert_eq!(got, "改名后");
+
+    // 空串回退主机名。
+    service.set_own_name("   ");
+    assert_eq!(service.own_name(), local_device_name());
+
+    client.close().await;
+    shutdown_iroh_service(&service);
+}
+
+#[tokio::test]
 async fn two_endpoints_exchange_names_over_stream() {
     use iroh::endpoint::presets;
     use onelink::net::ALPN;

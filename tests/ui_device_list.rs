@@ -171,6 +171,138 @@ fn clicking_device_row_emits_selected(cx: &mut TestAppContext) {
     );
 }
 
+/// 宿主包装：收集列表事件，便于断言"提交/取消"。
+struct AliasHost {
+    list: Entity<DeviceList>,
+    events: Rc<RefCell<Vec<DeviceListEvent>>>,
+    _sub: Subscription,
+}
+
+impl Render for AliasHost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(self.list.clone())
+    }
+}
+
+fn alias_host(
+    cx: &mut TestAppContext,
+) -> (
+    gpui_kit::WindowHandle<gpui_kit::base::Root>,
+    Entity<AliasHost>,
+) {
+    cx.update(gpui_kit::init);
+    let events: Rc<RefCell<Vec<DeviceListEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink_sub = Rc::clone(&events);
+    let sink_host = Rc::clone(&events);
+    common::open_window(cx, None, move |_window, cx| {
+        cx.new(move |cx| {
+            let list = cx.new(|cx| {
+                let mut list = DeviceList::new(cx);
+                list.registry_mut().upsert(DeviceInfo {
+                    node_id: "n1".into(),
+                    name: "书房Mac".into(),
+                    alias: None,
+                    addr: None,
+                    online: true,
+                    last_seen: SystemTime::now(),
+                });
+                list
+            });
+            let sub = cx.subscribe(&list, move |_h, _l, ev: &DeviceListEvent, _cx| {
+                sink_sub.borrow_mut().push(ev.clone());
+            });
+            AliasHost {
+                list,
+                events: Rc::clone(&sink_host),
+                _sub: sub,
+            }
+        })
+    })
+}
+
+/// Enter 提交备注：行内立即显示别名，并抛出可落库的事件。
+#[gpui_kit::test]
+fn alias_edit_enter_commits_and_shows_alias(cx: &mut TestAppContext) {
+    let (handle, host) = alias_host(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        window.click("alias-edit-n1", cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(
+            window.try_find("alias-input-n1").is_some(),
+            "editor should open"
+        );
+        window.input("客厅机器", cx);
+        window.press("enter", cx);
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    let events = cx.update(|cx| host.read(cx).events.borrow().clone());
+    assert_eq!(
+        events,
+        vec![DeviceListEvent::AliasSubmitted {
+            node_id: "n1".into(),
+            alias: Some("客厅机器".into())
+        }]
+    );
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let label = window
+            .find("device-n1")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(label.contains("客厅机器"), "label was {label}");
+        assert!(
+            window.try_find("alias-input-n1").is_none(),
+            "editor should close"
+        );
+    })
+    .unwrap();
+}
+
+/// Esc 取消：不发提交事件（因此不会写库），行内容保持原名。
+#[gpui_kit::test]
+fn alias_edit_escape_cancels_without_submit(cx: &mut TestAppContext) {
+    let (handle, host) = alias_host(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        window.click("alias-edit-n1", cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        window.input("临时输入", cx);
+        window.press("escape", cx);
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    let events = cx.update(|cx| host.read(cx).events.borrow().clone());
+    assert_eq!(events, vec![DeviceListEvent::AliasCancelled]);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let label = window
+            .find("device-n1")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(label.contains("书房Mac"), "label was {label}");
+        assert!(window.try_find("alias-input-n1").is_none());
+    })
+    .unwrap();
+}
+
 /// 回归：行宽由侧栏决定，与用户名长度无关（短名/长名/带未读角标都一样）。
 #[gpui_kit::test]
 fn rows_fill_sidebar_regardless_of_name_length(cx: &mut TestAppContext) {

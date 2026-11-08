@@ -6,9 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt;
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::{
-    AsyncApp, Context, Entity, FontWeight, IntoElement, ParentElement, PathPromptOptions, Render,
-    Styled, Subscription, WeakEntity, Window, div, prelude::*, px, rgb,
+    AsyncApp, Context, Entity, FontWeight, IntoElement, KeyDownEvent, ParentElement,
+    PathPromptOptions, Render, Styled, Subscription, WeakEntity, Window, div, prelude::*, px, rgb,
 };
 
 use crate::chat::{ChatMessage, ChatStore, MessageStatus};
@@ -17,7 +18,7 @@ use crate::proto::now_ms;
 use crate::store::{Loaded, Store};
 use crate::ui::chat_panel::{ChatPanel, ChatPanelEvent};
 use crate::ui::device_list::{DeviceList, DeviceListEvent};
-use crate::ui::theme::{color, size, space, text};
+use crate::ui::theme::{color, radius, size, space, text};
 use crate::ui::transfer_row::{TransferState, TransferView};
 
 /// 事件泵轮询间隔。
@@ -32,6 +33,14 @@ pub struct App {
     service: Arc<IrohServiceHandle>,
     /// 本地持久化（异步单写线程）；UI 只投递命令，不阻塞。
     store: Store,
+    /// 用户设置的昵称（空串 = 使用默认名）。
+    nickname: String,
+    /// 主机名兜底，界面上标为"默认名"。
+    default_name: String,
+    /// 是否正在编辑昵称。
+    nickname_editing: bool,
+    /// 昵称输入框（常驻，打开编辑时才显示）。
+    nickname_input: Entity<TextareaState>,
     /// 子组件事件订阅；drop 即取消订阅。
     _subs: Vec<Subscription>,
 }
@@ -45,10 +54,30 @@ impl App {
         loaded: Loaded,
     ) -> Self {
         let Loaded {
-            devices, histories, ..
+            devices,
+            histories,
+            self_nickname,
         } = loaded;
+        let nickname = self_nickname.unwrap_or_default();
+        let default_name = crate::net::local_device_name();
         let mut chat_store = ChatStore::new();
         chat_store.hydrate(histories);
+
+        let nickname_input = cx.new(|cx| TextareaState::new(window, cx).submit_on_enter(true));
+        nickname_input.update(cx, |state, cx| {
+            state.set_placeholder(format!("留空则使用默认名 {default_name}"), window, cx);
+        });
+        let sub_nickname = cx.subscribe_in(
+            &nickname_input,
+            window,
+            |this, _input, ev: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { shift, .. } = ev
+                    && !*shift
+                {
+                    this.save_nickname(window, cx);
+                }
+            },
+        );
 
         let device_list = cx.new(DeviceList::new);
         let chat_panel = cx.new(|cx| ChatPanel::new(window, cx));
@@ -69,21 +98,36 @@ impl App {
         let sub_device = cx.subscribe_in(
             &device_list,
             window,
-            |this, _list, ev: &DeviceListEvent, _window, cx| {
-                let DeviceListEvent::Selected(peer) = ev;
-                this.chat_store.select(peer);
-                // 选中即已读：内存标记 + 落库，未读角标清零。
-                this.store.mark_read(peer);
-                let messages = this.chat_store.messages(peer).to_vec();
-                let transfers = this.transfers.get(peer).cloned().unwrap_or_default();
-                this.chat_panel.update(cx, |panel, cx| {
-                    panel.show(peer, messages, cx);
-                    panel.set_transfers(transfers, cx);
-                });
-                let unread = this.chat_store.unread(peer);
-                this.device_list
-                    .update(cx, |list, cx| list.set_unread(peer, unread, cx));
-                cx.notify();
+            |this, _list, ev: &DeviceListEvent, _window, cx| match ev {
+                DeviceListEvent::Selected(peer) => {
+                    this.chat_store.select(peer);
+                    // 选中即已读：内存标记 + 落库，未读角标清零。
+                    this.store.mark_read(peer);
+                    let peer_name = this.display_name(peer, cx);
+                    let messages = this.chat_store.messages(peer).to_vec();
+                    let transfers = this.transfers.get(peer).cloned().unwrap_or_default();
+                    this.chat_panel.update(cx, |panel, cx| {
+                        panel.show(peer, messages, cx);
+                        panel.set_peer_name(peer_name, cx);
+                        panel.set_transfers(transfers, cx);
+                    });
+                    let unread = this.chat_store.unread(peer);
+                    this.device_list
+                        .update(cx, |list, cx| list.set_unread(peer, unread, cx));
+                    cx.notify();
+                }
+                // 备注只影响本地显示；先落库，再让会话标题跟着改。
+                DeviceListEvent::AliasSubmitted { node_id, alias } => {
+                    this.store.set_alias(node_id, alias.as_deref());
+                    if this.chat_store.selected() == Some(node_id.as_str()) {
+                        let name = this.display_name(node_id, cx);
+                        this.chat_panel
+                            .update(cx, |panel, cx| panel.set_peer_name(name, cx));
+                    }
+                    cx.notify();
+                }
+                // 取消编辑不产生任何写入。
+                DeviceListEvent::AliasCancelled => {}
             },
         );
 
@@ -158,8 +202,57 @@ impl App {
             transfers: BTreeMap::new(),
             service,
             store,
-            _subs: vec![sub_device, sub_chat],
+            nickname,
+            default_name,
+            nickname_editing: false,
+            nickname_input,
+            _subs: vec![sub_device, sub_chat, sub_nickname],
         }
+    }
+
+    /// 设备显示名（备注优先、其次握手名）。未知设备返回 `None`。
+    fn display_name(&self, node_id: &str, cx: &gpui_kit::App) -> Option<String> {
+        self.device_list
+            .read(cx)
+            .device(node_id)
+            .map(|d| d.display_name().to_string())
+    }
+
+    /// 品牌头那行昵称文案：空设置回退主机名并标注"默认"。
+    fn nickname_label(&self) -> String {
+        if self.nickname.trim().is_empty() {
+            format!("我的昵称：{}（默认）", self.default_name)
+        } else {
+            format!("我的昵称：{}", self.nickname)
+        }
+    }
+
+    /// 打开昵称编辑：预填当前设置值并聚焦。
+    fn begin_nickname_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.nickname.clone();
+        self.nickname_input.update(cx, |state, cx| {
+            state.set_value(value, window, cx);
+            state.focus(window, cx);
+        });
+        self.nickname_editing = true;
+        cx.notify();
+    }
+
+    /// 提交昵称：空白串按"使用默认名"处理；立即写库并换掉运行期的握手名。
+    fn save_nickname(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let raw = self.nickname_input.read(cx).value().to_string();
+        let nickname = raw.trim().to_string();
+        self.store.set_self_nickname(&nickname);
+        self.service.set_own_name(&nickname);
+        self.nickname = nickname;
+        self.nickname_editing = false;
+        cx.notify();
+    }
+
+    /// 取消昵称编辑：不写库，仅收起编辑态。
+    fn cancel_nickname(&mut self, cx: &mut Context<Self>) {
+        self.nickname_editing = false;
+        cx.notify();
     }
 
     /// 弹出系统文件选择框；选中后把路径交给 iroh 服务并发一条 `Waiting` 传输行。
@@ -257,6 +350,11 @@ impl App {
     /// 测试/调试用：左侧设备列表实体。
     pub fn device_list(&self) -> Entity<DeviceList> {
         self.device_list.clone()
+    }
+
+    /// 当前网络层使用的对外昵称（测试/回显用）。
+    pub fn service_own_name(&self) -> String {
+        self.service.own_name()
     }
 
     /// 测试/调试用：右侧聊天面板实体。
@@ -406,8 +504,98 @@ impl App {
     }
 }
 
+/// 品牌头的昵称编辑行：Enter 提交（输入框订阅里处理）、Esc 取消。
+fn nickname_editor_row(
+    input: &Entity<TextareaState>,
+    default_name: &str,
+    cx: &mut Context<App>,
+) -> gpui_kit::AnyElement {
+    let action = |id: &str, label: &'static str, accent: bool| {
+        div()
+            .id(id.to_string())
+            .test_support()
+            .aria_label(label)
+            .flex_shrink_0()
+            .px(px(space::S1))
+            .rounded(px(radius::SM))
+            .text_size(px(text::CAPTION))
+            .text_color(rgb(if accent {
+                color::ACCENT
+            } else {
+                color::TEXT_MUTED
+            }))
+            .child(label)
+    };
+
+    div()
+        .id("nickname-editor")
+        .test_support()
+        .flex()
+        .flex_col()
+        .gap(px(space::S1))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(space::S1))
+                .w_full()
+                .child(
+                    div()
+                        .id("nickname-input")
+                        .test_support()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .h(px(30.))
+                        .px(px(space::S2))
+                        .rounded(px(radius::SM))
+                        .bg(rgb(color::SURFACE))
+                        .border_1()
+                        .border_color(rgb(color::FOCUS_BORDER))
+                        .child(Textarea::new(input).h(px(26.)).text_size(px(text::CAPTION))),
+                )
+                .child(
+                    action("nickname-save", "保存", true).on_click(
+                        cx.listener(|this, _ev, window, cx| this.save_nickname(window, cx)),
+                    ),
+                )
+                .child(
+                    action("nickname-cancel", "取消", false)
+                        .on_click(cx.listener(|this, _ev, _window, cx| this.cancel_nickname(cx))),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(text::CAPTION))
+                .text_color(rgb(color::TEXT_MUTED))
+                .child(format!("留空则使用默认名：{default_name}")),
+        )
+        .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+            if ev.keystroke.key == "escape" {
+                this.cancel_nickname(cx);
+            }
+        }))
+        .into_any_element()
+}
+
 impl Render for App {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let nickname_label = self.nickname_label();
+        let nickname_line = (!self.nickname_editing).then(|| {
+            div()
+                .id("nickname-line")
+                .test_support()
+                .aria_label(nickname_label.clone())
+                .text_size(px(text::CAPTION))
+                .text_color(rgb(color::TEXT_MUTED))
+                .child(nickname_label)
+        });
+        let nickname_editor = self
+            .nickname_editing
+            .then(|| nickname_editor_row(&self.nickname_input, &self.default_name, cx));
         div()
             .id("app-root")
             .test_support()
@@ -430,24 +618,49 @@ impl Render for App {
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(2.))
+                            .gap(px(space::S2))
                             .px(px(space::S3))
                             .py(px(space::S3))
                             .border_b_1()
                             .border_color(rgb(color::DIVIDER))
                             .child(
                                 div()
-                                    .text_size(px(text::BRAND))
-                                    .text_color(rgb(color::TEXT))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("OneLink"),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .w_full()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(text::BRAND))
+                                            .text_color(rgb(color::TEXT))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("OneLink"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("nickname-edit")
+                                            .test_support()
+                                            .aria_label("设置昵称")
+                                            .px(px(space::S1))
+                                            .rounded(px(radius::SM))
+                                            .text_size(px(text::CAPTION))
+                                            .text_color(rgb(color::TEXT_MUTED))
+                                            .hover(|el| el.text_color(rgb(color::TEXT_SECONDARY)))
+                                            .child("昵称")
+                                            .on_click(cx.listener(|this, _ev, window, cx| {
+                                                this.begin_nickname_edit(window, cx);
+                                            })),
+                                    ),
                             )
                             .child(
                                 div()
                                     .text_size(px(text::CAPTION))
                                     .text_color(rgb(color::TEXT_MUTED))
                                     .child("局域网直连 · 无需服务器"),
-                            ),
+                            )
+                            .when_some(nickname_line, |col, line| col.child(line))
+                            .when_some(nickname_editor, |col, editor| col.child(editor)),
                     )
                     .child(
                         // 列方向 flex：子项按容器宽度拉伸，避免设备列表收缩到内容宽度。

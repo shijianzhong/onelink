@@ -200,11 +200,24 @@ pub struct IrohServiceHandle {
     alive: Arc<AtomicBool>,
     /// 服务线程 join 句柄（take 后不可重复 join）。
     join: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// 运行期可换的对外昵称（握手应答/主动握手都读它）。
+    own_name: OwnName,
 }
 
 impl IrohServiceHandle {
     pub fn is_running(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// 运行期更换对外昵称（空串回退主机名）。下一帧握手立即生效，无需重启服务。
+    pub fn set_own_name(&self, nickname: &str) {
+        let next = normalize_own_name(nickname);
+        *self.own_name.lock().unwrap_or_else(|e| e.into_inner()) = next;
+    }
+
+    /// 当前对外昵称（UI 回显/测试用）。
+    pub fn own_name(&self) -> String {
+        current_own_name(&self.own_name)
     }
 
     /// 投递一条聊天消息到 `peer_id`；返回本条消息 id，调用方立刻用它渲染本地气泡。
@@ -725,6 +738,23 @@ pub fn local_device_name() -> String {
     gethostname::gethostname().to_string_lossy().to_string()
 }
 
+/// 服务运行期的对外昵称：握手时读取，支持不重启服务直接改名。
+pub type OwnName = Arc<std::sync::Mutex<String>>;
+
+/// 空昵称回退主机名，两侧空白一并去掉。
+fn normalize_own_name(nickname: &str) -> String {
+    if nickname.trim().is_empty() {
+        local_device_name()
+    } else {
+        nickname.trim().to_string()
+    }
+}
+
+/// 读出当前昵称（持锁期间只做一次 clone）。
+pub fn current_own_name(name: &OwnName) -> String {
+    name.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// 主动握手：连接对方，打开双向流发 `Hello{our_name}`，读回 `HelloAck{name}`。
 pub async fn handshake_name(
     endpoint: &Endpoint,
@@ -809,8 +839,20 @@ pub async fn serve_frames(
     queue: &Arc<EventQueue>,
     xfers: &Arc<XferState>,
 ) -> anyhow::Result<()> {
+    // 固定昵称入口：内部包成一个不会变化的共享名，供测试/工具直接调用。
+    let fixed: OwnName = Arc::new(std::sync::Mutex::new(our_name.to_string()));
+    serve_frames_with_name(endpoint, &fixed, queue, xfers).await
+}
+
+/// 服务入口：昵称从共享单元现读，`set_own_name` 后下一帧握手即用新名。
+pub async fn serve_frames_with_name(
+    endpoint: &Endpoint,
+    our_name: &OwnName,
+    queue: &Arc<EventQueue>,
+    xfers: &Arc<XferState>,
+) -> anyhow::Result<()> {
     while let Some(incoming) = endpoint.accept().await {
-        let our_name = our_name.to_string();
+        let our_name = Arc::clone(our_name);
         let queue = Arc::clone(queue);
         let xfers = Arc::clone(xfers);
         let endpoint = endpoint.clone();
@@ -859,7 +901,7 @@ async fn read_framed(recv: &mut iroh::endpoint::RecvStream, limit: usize) -> any
 /// 文件控制帧只处理不发回执（accept/reject 由本端主动连回发送端）。
 pub async fn dispatch_connection(
     conn: Connection,
-    our_name: &str,
+    our_name: &OwnName,
     queue: &Arc<EventQueue>,
     xfers: &Arc<XferState>,
     endpoint: &Endpoint,
@@ -883,7 +925,7 @@ pub async fn dispatch_connection(
         Frame::Hello { name } => {
             tracing::info!(peer_name = %name, "received hello");
             let ack = encode_frame(&Frame::HelloAck {
-                name: our_name.to_string(),
+                name: current_own_name(our_name),
             })?;
             send.write_all(&ack).await?;
             send.shutdown().await?;
@@ -1157,12 +1199,9 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
 
 /// 启动服务，握手时用调用方给的昵称（空串回退主机名）。
 pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServiceHandle> {
-    // 昵称优先取本地设置；为空则用主机名兜底。
-    let our_name = if nickname.trim().is_empty() {
-        local_device_name()
-    } else {
-        nickname.trim().to_string()
-    };
+    // 昵称优先取本地设置；为空则用主机名兜底。运行期可经 `set_own_name` 替换。
+    let own_name: OwnName = Arc::new(std::sync::Mutex::new(normalize_own_name(&nickname)));
+    let thread_own_name = Arc::clone(&own_name);
     let queue = EventQueue::new(EVENT_QUEUE_CAPACITY);
     let service_queue = Arc::clone(&queue);
     let err_queue = Arc::clone(&queue);
@@ -1188,11 +1227,16 @@ pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServ
                 .map_err(|e| anyhow::anyhow!("endpoint bind: {e}"))?;
             let self_id = endpoint.id();
             let node_id = self_id.to_string();
-            // `our_name` 由构造函数按本地昵称决定（空则主机名）。
+            // `thread_own_name` 是运行期昵称，握手时现读，改名无需重启服务。
             let self_addr = endpoint.addr();
             // 把地址交回构造函数：测试/手动直连不用再等 mDNS 发现。
             let _ = addr_tx.send(Ok(self_addr));
-            tracing::info!(node_id, our_name, %MDNS_SERVICE, "iroh endpoint bound");
+            tracing::info!(
+                node_id,
+                our_name = %current_own_name(&thread_own_name),
+                %MDNS_SERVICE,
+                "iroh endpoint bound"
+            );
 
             let mdns = MdnsAddressLookup::builder()
                 .service_name(MDNS_SERVICE)
@@ -1207,12 +1251,13 @@ pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServ
             // 服务端任务：一条 accept 循环，同时服务握手与聊天帧
             // （非 ALPN 连接已在 alpns 层拒绝）。
             let endpoint_serve = endpoint.clone();
-            let serve_name = our_name.clone();
+            let serve_name = Arc::clone(&thread_own_name);
             let serve_queue = Arc::clone(&service_queue);
             let serve_xfers = Arc::clone(&thread_xfers);
             let serve_task = tokio::spawn(async move {
                 if let Err(e) =
-                    serve_frames(&endpoint_serve, &serve_name, &serve_queue, &serve_xfers).await
+                    serve_frames_with_name(&endpoint_serve, &serve_name, &serve_queue, &serve_xfers)
+                        .await
                 {
                     tracing::warn!("serve_frames ended: {e:#}");
                 }
@@ -1221,7 +1266,7 @@ pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServ
             // 发现任务：mDNS discovered/expired → UiEvent；发现即主动握手换设备名。
             let mdns_queue = Arc::clone(&service_queue);
             let endpoint_mdns = endpoint.clone();
-            let mdns_name = our_name.clone();
+            let mdns_name = Arc::clone(&thread_own_name);
             let mdns_task = tokio::spawn(async move {
                 let mut stream = mdns.subscribe().await;
                 let mut handshaked: HashSet<EndpointId> = HashSet::new();
@@ -1241,8 +1286,8 @@ pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServ
                             let mut attempt = 0;
                             loop {
                                 attempt += 1;
-                                match handshake_name(&ep, EndpointAddr::from(peer_id), &name).await
-                                {
+                                let our = current_own_name(&name);
+                                match handshake_name(&ep, EndpointAddr::from(peer_id), &our).await {
                                     Ok(peer_name) => {
                                         push_event(
                                             &q,
@@ -1327,6 +1372,7 @@ pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServ
         stop,
         alive,
         join: Mutex::new(Some(join)),
+        own_name,
     })
 }
 

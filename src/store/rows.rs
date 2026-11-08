@@ -77,7 +77,9 @@ pub fn load(conn: &Connection) -> Result<Loaded> {
             [],
             |row| row.get(0),
         )
-        .ok();
+        .ok()
+        // 空串代表"用默认名"：加载时归一成 None，UI/网络层按主机名兜底。
+        .filter(|name: &String| !name.trim().is_empty());
     Ok(Loaded {
         devices,
         histories,

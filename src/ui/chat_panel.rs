@@ -36,6 +36,8 @@ impl EventEmitter<ChatPanelEvent> for ChatPanel {}
 pub struct ChatPanel {
     input: Entity<TextareaState>,
     peer: Option<String>,
+    /// 会话标题显示的对方名（备注优先，由 `App` 推送；`None` 时回落到短 id）。
+    peer_name: Option<String>,
     messages: Vec<ChatMessage>,
     /// 当前会话的传输行（由 `App` 按 peer 维护后推入）。
     transfers: Vec<TransferView>,
@@ -73,6 +75,7 @@ impl ChatPanel {
         Self {
             input,
             peer: None,
+            peer_name: None,
             messages: Vec::new(),
             transfers: Vec::new(),
             error: None,
@@ -99,8 +102,21 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// 切换会话标题上显示的对方名（备注改名后由 `App` 立即推送）。
+    pub fn set_peer_name(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        if self.peer_name == name {
+            return;
+        }
+        self.peer_name = name;
+        cx.notify();
+    }
+
     /// 切换到某个会话并刷新消息列表（不清输入框内容）。
     pub fn show(&mut self, peer: &str, messages: Vec<ChatMessage>, cx: &mut Context<Self>) {
+        let peer_changed = self.peer.as_deref() != Some(peer);
+        if peer_changed {
+            self.peer_name = None;
+        }
         self.peer = Some(peer.to_string());
         self.messages = messages;
         cx.notify();
@@ -196,8 +212,13 @@ impl Render for ChatPanel {
         let (title, subtitle) = match &self.peer {
             Some(peer) => {
                 let short: String = peer.chars().take(8).collect();
+                let name = self
+                    .peer_name
+                    .clone()
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or(short);
                 (
-                    format!("与 {short} 聊天"),
+                    format!("与 {name} 聊天"),
                     "局域网直连 · 端到端传输".to_string(),
                 )
             }

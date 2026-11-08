@@ -74,6 +74,21 @@ impl DeviceRegistry {
         }
     }
 
+    /// 设置本地备注（只改显示名，不碰握手换来的 `name`）。
+    ///
+    /// `None` 或空白串表示清空备注，回落到 `name`。未知 node_id 不产生事件。
+    pub fn set_alias(&mut self, node_id: &str, alias: Option<String>) -> Option<DeviceChange> {
+        let alias = alias
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty());
+        let info = self.devices.get_mut(node_id)?;
+        if info.alias == alias {
+            return None;
+        }
+        info.alias = alias;
+        Some(DeviceChange::Updated(info.clone()))
+    }
+
     /// 标记设备离线。未知 node_id 不产生事件。
     pub fn mark_offline(&mut self, node_id: &str) -> Option<DeviceChange> {
         let info = self.devices.get_mut(node_id)?;

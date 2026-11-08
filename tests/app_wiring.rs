@@ -63,6 +63,108 @@ fn seed_device(app: &Entity<OneLinkApp>, cx: &mut App, id: &str) {
     });
 }
 
+/// 备注提交后，设备行与聊天标题立即用新备注（不改变握手真名）。
+#[gpui_kit::test]
+fn alias_edit_updates_row_and_chat_title(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, app, service) = open_app(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        seed_device(&app, cx, "n1");
+        window.draw(cx).clear(cx);
+        window.click("device-n1", cx);
+        window.draw(cx).clear(cx);
+        window.click("alias-edit-n1", cx);
+        window.draw(cx).clear(cx);
+        window.input("客厅机器", cx);
+        window.press("enter", cx);
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let row = window
+            .find("device-n1")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(row.contains("客厅机器"), "row was {row}");
+        let header = window
+            .find("chat-header")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(header.contains("客厅机器"), "header was {header}");
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, _, cx| {
+        // 握手真名不受备注影响。
+        let device = app.read(cx).device_list().read(cx).device("n1").unwrap();
+        assert_eq!(device.name, "书房Mac");
+        assert_eq!(device.alias.as_deref(), Some("客厅机器"));
+    })
+    .unwrap();
+
+    shutdown_iroh_service(&service);
+}
+
+/// 昵称：默认态标"（默认）"，保存后换成新名；Esc 取消不写入。
+#[gpui_kit::test]
+fn nickname_edit_saves_and_escape_cancels(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, app, service) = open_app(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let line = window
+            .find("nickname-line")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(line.contains("（默认）"), "line was {line}");
+        window.click("nickname-edit", cx);
+        window.draw(cx).clear(cx);
+        window.input("阿钟", cx);
+        window.press("enter", cx);
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    // 保存后：行显示新昵称，运行期的握手名同步换掉。
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let line = window
+            .find("nickname-line")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(line.contains("阿钟"), "line was {line}");
+        assert!(!line.contains("（默认）"), "line was {line}");
+        assert_eq!(app.read(cx).service_own_name(), "阿钟");
+    })
+    .unwrap();
+
+    // 再次打开编辑 → Esc：昵称不变。
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("nickname-edit", cx);
+        window.draw(cx).clear(cx);
+        window.input("不会生效", cx);
+        window.press("escape", cx);
+        window.draw(cx).clear(cx);
+        let line = window
+            .find("nickname-line")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(line.contains("阿钟"), "line was {line}");
+    })
+    .unwrap();
+
+    shutdown_iroh_service(&service);
+}
+
 #[gpui_kit::test]
 fn clicking_device_row_opens_that_conversation(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
