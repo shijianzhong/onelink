@@ -22,8 +22,6 @@ pub mod color {
     pub const BUBBLE_PEER_BORDER: u32 = 0xE6E6E6;
     /// 主操作色：在线状态点、发送按钮、传输进度条。
     pub const ACCENT: u32 = 0x07C160;
-    /// 输入框聚焦描边（微信绿 40% 叠白）：能感知聚焦，但不抢眼。
-    pub const FOCUS_BORDER: u32 = 0x9CE6BF;
     /// 主文字。
     pub const TEXT: u32 = 0x1A1A1A;
     /// 次级文字（状态、副标题）。

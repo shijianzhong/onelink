@@ -554,8 +554,14 @@ fn nickname_editor_row(
                         .rounded(px(radius::SM))
                         .bg(rgb(color::SURFACE))
                         .border_1()
-                        .border_color(rgb(color::FOCUS_BORDER))
-                        .child(Textarea::new(input).h(px(26.)).text_size(px(text::CAPTION))),
+                        // 静态分隔色：聚焦不加任何描边强调，只靠光标。
+                        .border_color(rgb(color::DIVIDER))
+                        .child(
+                            Textarea::new(input)
+                                .appearance(false)
+                                .h(px(26.))
+                                .text_size(px(text::CAPTION)),
+                        ),
                 )
                 .child(
                     action("nickname-save", "保存", true).on_click(

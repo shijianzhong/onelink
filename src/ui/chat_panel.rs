@@ -43,9 +43,7 @@ pub struct ChatPanel {
     transfers: Vec<TransferView>,
     /// 最近一次发送失败的提示（成功发送或送达后清空）。
     error: Option<String>,
-    /// 输入框是否聚焦：驱动输入卡片的 1px 强调描边。
-    input_focused: bool,
-    /// 输入框事件订阅（Enter 发送、聚焦态切换）。
+    /// 输入框事件订阅（仅 Enter 发送）。
     _input_sub: Subscription,
 }
 
@@ -59,17 +57,12 @@ impl ChatPanel {
         let input_sub = cx.subscribe_in(
             &input,
             window,
-            |this, _input, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter { shift, .. } if !*shift => this.send(window, cx),
-                InputEvent::Focus => {
-                    this.input_focused = true;
-                    cx.notify();
+            |this, _input, ev: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { shift, .. } = ev
+                    && !*shift
+                {
+                    this.send(window, cx);
                 }
-                InputEvent::Blur => {
-                    this.input_focused = false;
-                    cx.notify();
-                }
-                _ => {}
             },
         );
         Self {
@@ -79,7 +72,6 @@ impl ChatPanel {
             messages: Vec::new(),
             transfers: Vec::new(),
             error: None,
-            input_focused: false,
             _input_sub: input_sub,
         }
     }
@@ -363,7 +355,7 @@ impl Render for ChatPanel {
             .when_some(transfers, |el, block| el.child(block))
             .when_some(error_row, |el, row| el.child(row))
             .child(
-                // 输入卡片：白底、圆角；聚焦只把描边从灰换成淡绿，避免整圈高饱和边框。
+                // 输入卡片：白底、圆角；描边为静态分隔色，聚焦不再改变边框，只靠光标提示。
                 div()
                     .id("chat-composer")
                     .test_support()
@@ -376,11 +368,7 @@ impl Render for ChatPanel {
                     .rounded(px(radius::LG))
                     .bg(rgb(color::SURFACE))
                     .border_1()
-                    .border_color(rgb(if self.input_focused {
-                        color::FOCUS_BORDER
-                    } else {
-                        color::DIVIDER
-                    }))
+                    .border_color(rgb(color::DIVIDER))
                     .child(
                         // wrapper 承载测试用的 `chat-input` id；点击中心即落在 Textarea 上。
                         div()
@@ -390,7 +378,10 @@ impl Render for ChatPanel {
                             .flex_col()
                             .min_h(px(size::COMPOSER_INPUT_H))
                             .child(
+                                // `appearance(false)`：不画组件自带背景/边框，也不触发聚焦 ring；
+                                // 输入卡片的静态描边由外层容器统一提供。
                                 Textarea::new(&self.input)
+                                    .appearance(false)
                                     .h(px(size::COMPOSER_INPUT_H))
                                     .text_size(px(text::MESSAGE)),
                             ),
