@@ -211,10 +211,22 @@ impl IrohServiceHandle {
     ///
     /// 同步返回：真正发送在服务线程里异步做，结果经 `ChatDelivered`/`ChatFailed` 回传。
     pub fn send_chat(&self, peer_id: &str, text: &str) -> u64 {
+        let msg_id = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        self.send_chat_with_id(peer_id, text, msg_id)
+    }
+
+    /// 用调用方指定的消息 id 发送（上层据此从持久化历史续号，重启后不与旧消息冲突）。
+    pub fn send_chat_with_id(&self, peer_id: &str, text: &str, msg_id: u64) -> u64 {
         match peer_id.parse::<EndpointId>() {
-            Ok(id) => self.send_chat_to(EndpointAddr::from(id), text),
+            Ok(id) => {
+                let frame = Frame::Chat {
+                    id: msg_id,
+                    text: text.to_string(),
+                    sent_at_ms: crate::proto::now_ms(),
+                };
+                self.dispatch_chat(EndpointAddr::from(id), frame)
+            }
             Err(e) => {
-                let (msg_id, _) = self.prepare_chat(text);
                 push_event(
                     &self.tx,
                     UiEvent::ChatFailed {
@@ -230,9 +242,18 @@ impl IrohServiceHandle {
 
     /// 同 [`Self::send_chat`]，但目标用 `EndpointAddr`（可带直连地址，供测试/手动直连）。
     pub fn send_chat_to(&self, peer: EndpointAddr, text: &str) -> u64 {
-        let (msg_id, frame) = self.prepare_chat(text);
+        let (_, frame) = self.prepare_chat(text);
+        self.dispatch_chat(peer, frame)
+    }
+
+    /// 把已构造好的 Chat 帧交给服务线程；超长/通道关闭都在这里统一处理。
+    fn dispatch_chat(&self, peer: EndpointAddr, frame: Frame) -> u64 {
+        let (msg_id, text_len) = match &frame {
+            Frame::Chat { id, text, .. } => (*id, text.len()),
+            _ => (0, 0),
+        };
         let node_id = peer.id.to_string();
-        if text.len() > MAX_FRAME_BYTES {
+        if text_len > MAX_FRAME_BYTES {
             // 超长文本本地拒绝，绝不发半截（Review Focus 2）
             push_event(
                 &self.tx,
@@ -1131,6 +1152,17 @@ async fn receive_into(
 /// 启动 iroh 服务线程：Endpoint(presets::N0，官方 relay 兜底) + mDNS 发现 +
 /// 连接 accept 循环。事件经有界队列暴露在 `handle.tx` 供 UI 轮询。
 pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
+    spawn_iroh_service_with_name(local_device_name())
+}
+
+/// 启动服务，握手时用调用方给的昵称（空串回退主机名）。
+pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServiceHandle> {
+    // 昵称优先取本地设置；为空则用主机名兜底。
+    let our_name = if nickname.trim().is_empty() {
+        local_device_name()
+    } else {
+        nickname.trim().to_string()
+    };
     let queue = EventQueue::new(EVENT_QUEUE_CAPACITY);
     let service_queue = Arc::clone(&queue);
     let err_queue = Arc::clone(&queue);
@@ -1156,7 +1188,7 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
                 .map_err(|e| anyhow::anyhow!("endpoint bind: {e}"))?;
             let self_id = endpoint.id();
             let node_id = self_id.to_string();
-            let our_name = local_device_name();
+            // `our_name` 由构造函数按本地昵称决定（空则主机名）。
             let self_addr = endpoint.addr();
             // 把地址交回构造函数：测试/手动直连不用再等 mDNS 发现。
             let _ = addr_tx.send(Ok(self_addr));

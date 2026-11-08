@@ -7,10 +7,23 @@ use std::time::SystemTime;
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
     pub node_id: String,
+    /// 握手收到的设备名（网络真源，只由网络事件更新）。
     pub name: String,
+    /// 本地备注名（只由用户写入；`None` 表示没备注）。
+    pub alias: Option<String>,
     pub addr: Option<String>,
     pub online: bool,
     pub last_seen: SystemTime,
+}
+
+impl DeviceInfo {
+    /// 显示名：本地备注优先，否则用握手收到的设备名。
+    pub fn display_name(&self) -> &str {
+        self.alias
+            .as_deref()
+            .filter(|alias| !alias.trim().is_empty())
+            .unwrap_or(&self.name)
+    }
 }
 
 /// 注册表变更事件。`Removed` 携带被移除设备的 `node_id`。
@@ -40,7 +53,14 @@ impl DeviceRegistry {
     }
 
     /// 插入或更新设备。首次发现发 `Added`，已存在发 `Updated`（去重）。
-    pub fn upsert(&mut self, info: DeviceInfo) -> Option<DeviceChange> {
+    ///
+    /// 本地备注只由用户写入：网络事件带来的 `alias: None` 不会清掉已有备注。
+    pub fn upsert(&mut self, mut info: DeviceInfo) -> Option<DeviceChange> {
+        if info.alias.is_none()
+            && let Some(existing) = self.devices.get(&info.node_id)
+        {
+            info.alias = existing.alias.clone();
+        }
         let node_id = info.node_id.clone();
         match self.devices.entry(node_id) {
             std::collections::btree_map::Entry::Vacant(e) => {
@@ -71,10 +91,10 @@ impl DeviceRegistry {
         }
     }
 
-    /// 全部设备快照，按设备名排序。
+    /// 全部设备快照，按显示名排序。
     pub fn snapshot(&self) -> Vec<DeviceInfo> {
         let mut v: Vec<DeviceInfo> = self.devices.values().cloned().collect();
-        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v.sort_by(|a, b| a.display_name().cmp(b.display_name()));
         v
     }
 
@@ -113,6 +133,7 @@ pub fn apply_ui_event(
                 .upsert(DeviceInfo {
                     node_id,
                     name,
+                    alias: None,
                     addr,
                     online: true,
                     last_seen: SystemTime::now(),
@@ -127,6 +148,7 @@ pub fn apply_ui_event(
                 .upsert(DeviceInfo {
                     node_id,
                     name,
+                    alias: None,
                     addr,
                     online: true,
                     last_seen: SystemTime::now(),

@@ -11,9 +11,10 @@ use gpui_kit::{
     Styled, Subscription, WeakEntity, Window, div, prelude::*, px, rgb,
 };
 
-use crate::chat::{ChatMessage, ChatStore};
+use crate::chat::{ChatMessage, ChatStore, MessageStatus};
 use crate::net::{IrohServiceHandle, UiEvent};
 use crate::proto::now_ms;
+use crate::store::{Loaded, Store};
 use crate::ui::chat_panel::{ChatPanel, ChatPanelEvent};
 use crate::ui::device_list::{DeviceList, DeviceListEvent};
 use crate::ui::theme::{color, size, space, text};
@@ -29,6 +30,8 @@ pub struct App {
     /// 按 peer 归属的传输行（会话切换时整份推给聊天面板）。
     transfers: BTreeMap<String, Vec<TransferView>>,
     service: Arc<IrohServiceHandle>,
+    /// 本地持久化（异步单写线程）；UI 只投递命令，不阻塞。
+    store: Store,
     /// 子组件事件订阅；drop 即取消订阅。
     _subs: Vec<Subscription>,
 }
@@ -38,9 +41,30 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
         service: Arc<IrohServiceHandle>,
+        store: Store,
+        loaded: Loaded,
     ) -> Self {
+        let Loaded {
+            devices, histories, ..
+        } = loaded;
+        let mut chat_store = ChatStore::new();
+        chat_store.hydrate(histories);
+
         let device_list = cx.new(DeviceList::new);
         let chat_panel = cx.new(|cx| ChatPanel::new(window, cx));
+        // 先把持久化的设备摆上列表（全部离线），未读角标按历史派生。
+        device_list.update(cx, |list, cx| list.hydrate(devices, cx));
+        let unread: Vec<(String, u32)> = chat_store
+            .peers()
+            .into_iter()
+            .map(|peer| {
+                let count = chat_store.unread(&peer);
+                (peer, count)
+            })
+            .collect();
+        for (peer, count) in unread {
+            device_list.update(cx, |list, cx| list.set_unread(&peer, count, cx));
+        }
 
         let sub_device = cx.subscribe_in(
             &device_list,
@@ -48,6 +72,8 @@ impl App {
             |this, _list, ev: &DeviceListEvent, _window, cx| {
                 let DeviceListEvent::Selected(peer) = ev;
                 this.chat_store.select(peer);
+                // 选中即已读：内存标记 + 落库，未读角标清零。
+                this.store.mark_read(peer);
                 let messages = this.chat_store.messages(peer).to_vec();
                 let transfers = this.transfers.get(peer).cloned().unwrap_or_default();
                 this.chat_panel.update(cx, |panel, cx| {
@@ -69,16 +95,19 @@ impl App {
                     let Some(peer) = this.chat_store.selected().map(|s| s.to_string()) else {
                         return;
                     };
-                    let id = this.service.send_chat(&peer, text);
-                    this.chat_store.append(
-                        &peer,
-                        ChatMessage {
-                            id,
-                            text: text.clone(),
-                            sent_at_ms: now_ms(),
-                            mine: true,
-                        },
-                    );
+                    // 出站 id 从库里续号（重启后接着历史最大值递增），避免与历史冲突。
+                    let id = this.chat_store.next_out_msg_id(&peer);
+                    this.service.send_chat_with_id(&peer, text, id);
+                    let msg = ChatMessage {
+                        id,
+                        text: text.clone(),
+                        sent_at_ms: now_ms(),
+                        mine: true,
+                        status: MessageStatus::Pending,
+                        read: false,
+                    };
+                    this.chat_store.append(&peer, msg.clone());
+                    this.store.insert_message(&peer, &msg);
                     let messages = this.chat_store.messages(&peer).to_vec();
                     this.chat_panel
                         .update(cx, |panel, cx| panel.show(&peer, messages, cx));
@@ -125,9 +154,10 @@ impl App {
         Self {
             device_list,
             chat_panel,
-            chat_store: ChatStore::new(),
+            chat_store,
             transfers: BTreeMap::new(),
             service,
+            store,
             _subs: vec![sub_device, sub_chat],
         }
     }
@@ -252,15 +282,19 @@ impl App {
                     text,
                     sent_at_ms,
                 } => {
-                    self.chat_store.append(
-                        &node_id,
-                        ChatMessage {
-                            id,
-                            text,
-                            sent_at_ms,
-                            mine: false,
-                        },
-                    );
+                    let msg = ChatMessage {
+                        id,
+                        text,
+                        sent_at_ms,
+                        mine: false,
+                        status: MessageStatus::Pending,
+                        // 正在看的会话直接算已读，其余留作未读。
+                        read: self.chat_store.selected() == Some(node_id.as_str()),
+                    };
+                    // 重复到达的消息（同一 peer/id）不渲染也不落库。
+                    if self.chat_store.append(&node_id, msg.clone()) {
+                        self.store.insert_message(&node_id, &msg);
+                    }
                     let unread = self.chat_store.unread(&node_id);
                     self.device_list.update(cx, |list, cx| {
                         list.set_unread(&node_id, unread, cx);
@@ -273,6 +307,10 @@ impl App {
                 }
                 UiEvent::ChatDelivered { node_id, id } => {
                     tracing::debug!(node_id, id, "chat delivered");
+                    self.chat_store
+                        .set_status(&node_id, id, MessageStatus::Delivered);
+                    self.store
+                        .set_message_status(&node_id, id, MessageStatus::Delivered);
                     // 送达即清掉当前会话的失败提示（只影响用户正在看的那个会话）。
                     if self.chat_store.selected() == Some(node_id.as_str()) {
                         self.chat_panel
@@ -285,7 +323,11 @@ impl App {
                     reason,
                 } => {
                     tracing::warn!(node_id, id, %reason, "chat send failed");
-                    // 只在失败发生在用户正看的会话时提示；后台会话的失败留日志（M3 的会话级标记再说）。
+                    self.chat_store
+                        .set_status(&node_id, id, MessageStatus::Failed);
+                    self.store
+                        .set_message_status(&node_id, id, MessageStatus::Failed);
+                    // 只在失败发生在用户正看的会话时提示；后台会话的失败留日志（会话级标记再说）。
                     if self.chat_store.selected() == Some(node_id.as_str()) {
                         let reason = reason.clone();
                         self.chat_panel
@@ -343,8 +385,20 @@ impl App {
                     self.update_transfer(&node_id, xfer_id, TransferState::Failed(reason), cx);
                 }
                 other => {
+                    let node_id = match &other {
+                        UiEvent::DeviceDiscovered { node_id, .. }
+                        | UiEvent::DeviceNamed { node_id, .. }
+                        | UiEvent::DeviceLost { node_id } => Some(node_id.clone()),
+                        _ => None,
+                    };
                     self.device_list
                         .update(cx, |list, cx| list.apply(other, cx));
+                    // 设备发现/改名/离线的结果落库（备注列不会被这里覆盖）。
+                    if let Some(node_id) = node_id
+                        && let Some(info) = self.device_list.read(cx).device(&node_id)
+                    {
+                        self.store.upsert_device(&info);
+                    }
                 }
             }
         }

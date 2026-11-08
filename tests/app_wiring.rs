@@ -10,6 +10,7 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{App, Entity, ExternalPaths, FileDropEvent, InputEvent, TestAppContext, px};
 use onelink::app::App as OneLinkApp;
 use onelink::net::{IrohServiceHandle, UiEvent, shutdown_iroh_service, spawn_iroh_service};
+use onelink::store::Store;
 
 /// 打开带真实 iroh 服务的 App 窗口（服务只用其命令/事件通道，不发真实消息）。
 fn open_app(
@@ -32,9 +33,12 @@ fn open_app_sized(
     Arc<IrohServiceHandle>,
 ) {
     let service = Arc::new(spawn_iroh_service().expect("spawn iroh service"));
+    let (store, loaded) = Store::open_in_memory();
     let (handle, app) = common::open_window(cx, size, {
         let service = Arc::clone(&service);
-        move |window, cx| cx.new(|cx| OneLinkApp::new(window, cx, Arc::clone(&service)))
+        move |window, cx| {
+            cx.new(|cx| OneLinkApp::new(window, cx, Arc::clone(&service), store, loaded))
+        }
     });
     (handle, app, service)
 }

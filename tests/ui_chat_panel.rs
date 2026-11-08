@@ -9,7 +9,7 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div,
 };
-use onelink::chat::ChatMessage;
+use onelink::chat::{ChatMessage, MessageStatus};
 use onelink::ui::chat_panel::{ChatPanel, ChatPanelEvent};
 
 fn msg(id: u64, text: &str, mine: bool) -> ChatMessage {
@@ -18,6 +18,8 @@ fn msg(id: u64, text: &str, mine: bool) -> ChatMessage {
         text: text.into(),
         sent_at_ms: id,
         mine,
+        status: MessageStatus::Pending,
+        read: false,
     }
 }
 

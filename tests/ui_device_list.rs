@@ -23,6 +23,7 @@ fn device_rows_show_status_dot_and_name(cx: &mut TestAppContext) {
             list.registry_mut().upsert(DeviceInfo {
                 node_id: "n1".into(),
                 name: "书房Mac".into(),
+                alias: None,
                 addr: None,
                 online: true,
                 last_seen: now,
@@ -30,6 +31,7 @@ fn device_rows_show_status_dot_and_name(cx: &mut TestAppContext) {
             list.registry_mut().upsert(DeviceInfo {
                 node_id: "n2".into(),
                 name: "云主机".into(),
+                alias: None,
                 addr: None,
                 online: false,
                 last_seen: now,
@@ -143,6 +145,7 @@ fn clicking_device_row_emits_selected(cx: &mut TestAppContext) {
                 list.registry_mut().upsert(DeviceInfo {
                     node_id: "n1".into(),
                     name: "书房Mac".into(),
+                    alias: None,
                     addr: None,
                     online: true,
                     last_seen: SystemTime::now(),
@@ -179,6 +182,7 @@ fn rows_fill_sidebar_regardless_of_name_length(cx: &mut TestAppContext) {
                 list.registry_mut().upsert(DeviceInfo {
                     node_id: "short".into(),
                     name: "云主机".into(),
+                    alias: None,
                     addr: None,
                     online: true,
                     last_seen: now,
@@ -186,6 +190,7 @@ fn rows_fill_sidebar_regardless_of_name_length(cx: &mut TestAppContext) {
                 list.registry_mut().upsert(DeviceInfo {
                     node_id: "long".into(),
                     name: "客厅那台非常非常长的设备名称用来验证省略号截断".into(),
+                    alias: None,
                     addr: None,
                     online: false,
                     last_seen: now,

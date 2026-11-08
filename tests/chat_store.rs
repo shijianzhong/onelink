@@ -1,4 +1,4 @@
-use onelink::chat::{ChatMessage, ChatStore};
+use onelink::chat::{ChatMessage, ChatStore, MessageStatus};
 
 fn msg(id: u64, text: &str, mine: bool) -> ChatMessage {
     ChatMessage {
@@ -6,6 +6,8 @@ fn msg(id: u64, text: &str, mine: bool) -> ChatMessage {
         text: text.into(),
         sent_at_ms: id,
         mine,
+        status: MessageStatus::Pending,
+        read: false,
     }
 }
 

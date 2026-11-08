@@ -6,6 +6,8 @@ pub mod app;
 pub mod chat;
 pub mod model;
 pub mod net;
+pub mod paths;
 pub mod proto;
+pub mod store;
 pub mod ui;
 pub mod xfer;

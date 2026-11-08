@@ -49,6 +49,20 @@ impl DeviceList {
         self.registry.snapshot()
     }
 
+    /// 按 node id 查设备快照（持久化/调试用）。
+    pub fn device(&self, node_id: &str) -> Option<DeviceInfo> {
+        self.registry.get(node_id).cloned()
+    }
+
+    /// 用持久化的设备列表填充（启动时全部按离线渲染，等 mDNS/握手再置在线）。
+    pub fn hydrate(&mut self, devices: Vec<DeviceInfo>, cx: &mut Context<Self>) {
+        for mut device in devices {
+            device.online = false;
+            self.registry.upsert(device);
+        }
+        cx.notify();
+    }
+
     /// 同步某个 peer 的未读数（0 表示清除）。
     pub fn set_unread(&mut self, peer: &str, count: u32, cx: &mut Context<Self>) {
         if self.unread.get(peer).copied().unwrap_or(0) == count {
@@ -103,8 +117,8 @@ fn device_row(
     div()
         .id(format!("device-{}", device.node_id))
         .test_support()
-        // aria 文本保持旧格式（状态点 + 名字），测试与无障碍语义不变。
-        .aria_label(format!("{dot} {}", device.name))
+        // aria 文本保持旧格式（状态点 + 显示名），测试与无障碍语义不变。
+        .aria_label(format!("{dot} {}", device.display_name()))
         .flex()
         // 行宽由侧栏决定，不随名字长度收缩：显式占满列表可用宽度。
         .w_full()
@@ -151,7 +165,7 @@ fn device_row(
                                 .text_ellipsis()
                                 .text_size(px(text::MESSAGE))
                                 .text_color(rgb(color::TEXT))
-                                .child(device.name.clone()),
+                                .child(device.display_name().to_string()),
                         )
                         // 在线状态：绿点在线、灰点离线（保留原语义），不参与宽度竞争。
                         .child(

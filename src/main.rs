@@ -29,9 +29,13 @@ fn initial_bounds(cx: &gpui_kit::App) -> gpui_kit::WindowBounds {
 fn main() {
     tracing_subscriber::fmt::init();
     tracing::info!("onelink starting");
+    // 打开本地库（损坏会自动备份重建）；昵称用于握手，空则回退主机名。
+    let (store, loaded) = onelink::store::Store::open(&onelink::paths::db_path());
+    let nickname = loaded.self_nickname.clone().unwrap_or_default();
     // 启动 iroh 服务（endpoint + mDNS 发现 + 握手），事件队列交给 UI 事件泵。
-    let service =
-        Arc::new(onelink::net::spawn_iroh_service().expect("failed to spawn iroh service"));
+    let service = Arc::new(
+        onelink::net::spawn_iroh_service_with_name(nickname).expect("failed to spawn iroh service"),
+    );
     let shutdown_handle = Arc::clone(&service);
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
@@ -47,7 +51,8 @@ fn main() {
         };
         gpui_kit::open_window(options, cx, move |window, cx| {
             window.set_window_title("OneLink");
-            cx.new(|cx| App::new(window, cx, Arc::clone(&service)))
+            let service = Arc::clone(&service);
+            cx.new(|cx| App::new(window, cx, service, store, loaded))
         })
         .expect("failed to open window");
     });

@@ -6,6 +6,7 @@ fn dev(node_id: &str, name: &str, online: bool) -> DeviceInfo {
     DeviceInfo {
         node_id: node_id.into(),
         name: name.into(),
+        alias: None,
         addr: None,
         online,
         last_seen: SystemTime::now(),
