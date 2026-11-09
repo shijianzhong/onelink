@@ -4,18 +4,20 @@
 //! 由 `App` 订阅后投递给 iroh 服务（UI 线程永不阻塞）。
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui_kit::base::input::Copy;
 use gpui_kit::base::{SelectableText, TestSupportExt, TextSelection};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::{
     App, ClipboardItem, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, FontWeight,
-    IntoElement, KeyBinding, MouseButton, MouseDownEvent, ParentElement, Render, Styled,
-    Subscription, Window, actions, div, prelude::*, px, rgb,
+    IntoElement, KeyBinding, MouseButton, MouseDownEvent, ParentElement, Render, ScrollHandle,
+    Styled, Subscription, Window, actions, div, point, prelude::*, px, rgb,
 };
 
 use crate::chat::ChatMessage;
 use crate::ui::theme::{color, radius, size, space, text};
+use crate::ui::thin_scrollbar;
 use crate::ui::transfer_row::{self, TransferView};
 
 actions!(chat_panel, [SendMessage]);
@@ -23,6 +25,9 @@ actions!(chat_panel, [SendMessage]);
 /// 消息区获得焦点后的键位上下文：选中消息文字后 Cmd/Ctrl+C 复制选区、
 /// Enter 继续发送（此时输入框已失焦，靠这里的绑定兜住既有交互）。
 const CHAT_CONTEXT: &str = "ChatPanel";
+
+/// 「已复制」反馈的停留时长。
+const COPIED_FEEDBACK: Duration = Duration::from_millis(1200);
 
 /// 面板向外抛的事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +60,14 @@ pub struct ChatPanel {
     _input_sub: Subscription,
     /// 消息区焦点：拖选/点击消息时把焦点移到这里，让 Cmd+C 走面板的复制绑定。
     focus_handle: FocusHandle,
+    /// 消息列表滚动位置（新消息自动贴底）。
+    messages_scroll: ScrollHandle,
+    /// 是否还需要把最后一条消息对齐到视口底部（等首帧布局量出位置再对齐）。
+    pending_scroll_bottom: bool,
+    /// 当前 hover 的消息（决定是否显示该条的复制按钮）。
+    hovered_message: Option<(bool, u64)>,
+    /// 刚通过复制按钮复制成功的消息（短暂显示「已复制」）。
+    copied_message: Option<(bool, u64)>,
 }
 
 impl ChatPanel {
@@ -91,6 +104,10 @@ impl ChatPanel {
             error: None,
             _input_sub: input_sub,
             focus_handle,
+            messages_scroll: ScrollHandle::new(),
+            pending_scroll_bottom: false,
+            hovered_message: None,
+            copied_message: None,
         }
     }
 
@@ -129,6 +146,9 @@ impl ChatPanel {
         }
         self.peer = Some(peer.to_string());
         self.messages = messages;
+        // 进入会话/来新消息时请求贴底：对齐放到 render 里做，用实测的子项位置，
+        // 避免 GPUI 把 padding 也算进滚动范围后留下的残余偏移。
+        self.pending_scroll_bottom = true;
         cx.notify();
     }
 
@@ -174,6 +194,70 @@ impl ChatPanel {
     fn send_on_enter(&mut self, _: &SendMessage, window: &mut Window, cx: &mut Context<Self>) {
         self.send(window, cx);
     }
+
+    /// 记录 hover 到哪条消息：只在该行显示复制入口，不改变任何布局。
+    fn set_message_hovered(&mut self, key: (bool, u64), hovered: bool, cx: &mut Context<Self>) {
+        let next = if hovered {
+            Some(key)
+        } else if self.hovered_message == Some(key) {
+            None
+        } else {
+            self.hovered_message
+        };
+        if next != self.hovered_message {
+            self.hovered_message = next;
+            cx.notify();
+        }
+    }
+
+    /// hover 复制入口：复制整条消息文本，并短暂显示「已复制」。
+    fn copy_message(&mut self, key: (bool, u64), text: String, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copied_message = Some(key);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_FEEDBACK).await;
+            this.update(cx, |this, cx| {
+                if this.copied_message == Some(key) {
+                    this.copied_message = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+    /// 贴底：用上一帧测到的最后一条消息位置对齐视口底部。
+    ///
+    /// 不用 `ScrollHandle::scroll_to_bottom`：GPUI 会把容器 padding 计入滚动范围，
+    /// 内容不满一屏时也会留下残余负偏移，把首条消息顶出可视区上沿（点不到、hover 失效）。
+    fn stick_to_bottom(&mut self, cx: &mut Context<Self>) {
+        if !self.pending_scroll_bottom {
+            return;
+        }
+        if self.messages.is_empty() {
+            self.pending_scroll_bottom = false;
+            return;
+        }
+        let Some(last) = self
+            .messages_scroll
+            .bounds_for_item(self.messages.len() - 1)
+        else {
+            // 首帧还没有布局数据：这一帧画完后会带上子项位置，再对齐一次。
+            cx.notify();
+            return;
+        };
+        let list = self.messages_scroll.bounds();
+        // 子项 bounds 是未叠加滚动偏移的布局坐标，因此差值可直接累加到当前偏移。
+        let delta = list.bottom() - px(space::S3) - last.bottom();
+        let max = self.messages_scroll.max_offset().y;
+        let y = (self.messages_scroll.offset().y + delta).clamp(-max, px(0.));
+        self.messages_scroll.set_offset(point(px(0.), y));
+        self.pending_scroll_bottom = false;
+    }
 }
 
 /// 把毫秒时间戳格式化成 `HH:MM`。
@@ -186,9 +270,50 @@ fn clock(sent_at_ms: u64) -> String {
     format!("{hour:02}:{minute:02}")
 }
 
-fn message_row(msg: &ChatMessage, cx: &mut Context<ChatPanel>) -> impl IntoElement {
+fn message_row(
+    msg: &ChatMessage,
+    hovered: bool,
+    copied: bool,
+    cx: &mut Context<ChatPanel>,
+) -> impl IntoElement {
     // 双方 id 空间独立，同一数字 id 会在同一会话里出现；element id 必须带方向前缀。
     let side = if msg.mine { "mine" } else { "peer" };
+    let key = (msg.mine, msg.id);
+    let copy_text = msg.text.clone();
+
+    // hover 复制入口：绝对定位在气泡外侧，既不占布局、也不压住正文，
+    // 因此不会让文字重排或消息跳动；固定宽高避免「复制/已复制」切换时抽动。
+    let copy_chip = div()
+        .id(format!("msg-copy-{side}-{}", msg.id))
+        .test_support()
+        .aria_label(if copied { "已复制" } else { "复制" })
+        .absolute()
+        .top(px(0.))
+        // 自己发的消息右对齐 -> 按钮放在气泡左侧；对方消息反之，始终落在空行区。
+        .when(msg.mine, |el| el.left(px(-(size::COPY_BTN_W + space::S2))))
+        .when(!msg.mine, |el| {
+            el.right(px(-(size::COPY_BTN_W + space::S2)))
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(size::COPY_BTN_W))
+        .h(px(size::COPY_BTN_H))
+        .rounded(px(radius::SM))
+        .bg(rgb(color::SURFACE))
+        .border_1()
+        .border_color(rgb(color::DIVIDER))
+        .text_size(px(text::CAPTION))
+        .text_color(rgb(if copied {
+            color::ACCENT
+        } else {
+            color::TEXT_SECONDARY
+        }))
+        .child(if copied { "已复制" } else { "复制" })
+        .on_click(cx.listener(move |this, _ev, _window, cx| {
+            this.copy_message(key, copy_text.clone(), cx);
+        }));
+
     let bubble = div()
         .id(format!("msg-{side}-{}", msg.id))
         .test_support()
@@ -212,11 +337,20 @@ fn message_row(msg: &ChatMessage, cx: &mut Context<ChatPanel>) -> impl IntoEleme
         .child(SelectableText::new(
             format!("msg-text-{side}-{}", msg.id),
             msg.text.clone(),
-        ));
+        ))
+        .when(hovered, |bubble| bubble.child(copy_chip));
 
     div()
+        .id(format!("msg-row-{side}-{}", msg.id))
+        .test_support()
+        // hover 只切换该行的复制入口显隐，不改动任何尺寸/间距。
+        .on_hover(cx.listener(move |this, is_hovered: &bool, _window, cx| {
+            this.set_message_hovered(key, *is_hovered, cx);
+        }))
         .flex()
         .flex_col()
+        // 消息按内容高度排布：多到超出可视高度时滚动，而不是被 flex 压扁。
+        .flex_shrink_0()
         .gap(px(2.))
         .when(msg.mine, |row| row.items_end())
         .when(!msg.mine, |row| row.items_start())
@@ -247,6 +381,7 @@ fn message_row(msg: &ChatMessage, cx: &mut Context<ChatPanel>) -> impl IntoEleme
 
 impl Render for ChatPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.stick_to_bottom(cx);
         let (title, subtitle) = match &self.peer {
             Some(peer) => {
                 let short: String = peer.chars().take(8).collect();
@@ -276,7 +411,10 @@ impl Render for ChatPanel {
             .flex_1()
             .min_h(px(0.))
             .px(px(space::S6))
-            .py(px(space::S3));
+            .py(px(space::S3))
+            // 消息多到超出可视高度时滚动；滚动条覆盖在右侧留白上，不占消息宽度。
+            .overflow_y_scroll()
+            .track_scroll(&self.messages_scroll);
         if self.messages.is_empty() {
             list = list.child(
                 div()
@@ -290,8 +428,12 @@ impl Render for ChatPanel {
             );
         }
         for msg in &self.messages {
-            list = list.child(message_row(msg, cx));
+            let key = (msg.mine, msg.id);
+            let hovered = self.hovered_message == Some(key);
+            let copied = self.copied_message == Some(key);
+            list = list.child(message_row(msg, hovered, copied, cx));
         }
+        list = list.child(thin_scrollbar(&self.messages_scroll));
 
         let transfers = (!self.transfers.is_empty()).then(|| {
             let mut block = div()

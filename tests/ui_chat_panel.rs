@@ -8,8 +8,8 @@ use gpui_kit::base::TextSelection;
 use gpui_kit::prelude::*;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div, point,
-    px,
+    Context, Entity, IntoElement, ParentElement, Render, ScrollDelta, Styled, Subscription, Window,
+    div, point, px, size,
 };
 use onelink::chat::{ChatMessage, MessageStatus};
 use onelink::ui::chat_panel::{ChatPanel, ChatPanelEvent};
@@ -396,6 +396,172 @@ fn selecting_message_keeps_enter_sending(cx: &mut TestAppContext) {
     cx.update_window(handle.into(), |_, _, cx| {
         let left = host.read(cx).panel.read(cx).input_text(cx);
         assert!(left.is_empty(), "input should be cleared, got {left:?}");
+    })
+    .unwrap();
+}
+
+/// hover 复制：只在该行出现弱化入口，点击复制整条消息（含换行），
+/// 且按钮出现/消失都不改变气泡位置。
+#[gpui_kit::test]
+fn hover_copy_button_copies_whole_message(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, _host) = common::open_window(cx, None, |window, cx| {
+        cx.new(|cx| {
+            let panel = cx.new(|cx| {
+                let mut p = ChatPanel::new(window, cx);
+                p.show(
+                    "peer-b",
+                    vec![msg(1, "我发的", true), msg(2, "第一行\n第二行", false)],
+                    cx,
+                );
+                p
+            });
+            let sub = cx.subscribe(&panel, |_h, _p, _ev: &ChatPanelEvent, _cx| {});
+            Host { panel, _sub: sub }
+        })
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        // 未 hover 时不存在任何复制入口，避免常驻大按钮。
+        assert!(
+            window.try_find("msg-copy-peer-2").is_none(),
+            "copy button must stay hidden before hover"
+        );
+        let bubble_before = window.find("msg-peer-2").bounds();
+
+        window.hover("msg-row-peer-2", cx);
+        window.draw(cx).clear(cx);
+
+        let chip = window
+            .try_find("msg-copy-peer-2")
+            .expect("copy button appears on hover");
+        assert_eq!(chip.label().unwrap_or_default(), "复制");
+        // 只针对 hover 的那一行，别的消息不显示入口。
+        assert!(
+            window.try_find("msg-copy-mine-1").is_none(),
+            "only the hovered row shows a copy button"
+        );
+        // 绝对定位的按钮不参与布局：气泡位置与尺寸前后完全一致。
+        assert_eq!(
+            bubble_before,
+            window.find("msg-peer-2").bounds(),
+            "copy button must not shift the bubble"
+        );
+
+        window.click("msg-copy-peer-2", cx);
+        let copied = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text().map(|text| text.to_string()));
+        assert_eq!(
+            copied.as_deref(),
+            Some("第一行\n第二行"),
+            "hover copy must copy the whole message text, newline included"
+        );
+
+        // 极轻反馈：按钮短暂变「已复制」，不弹窗、不通知。
+        window.draw(cx).clear(cx);
+        assert_eq!(
+            window.find("msg-copy-peer-2").label().unwrap_or_default(),
+            "已复制"
+        );
+
+        // 鼠标离开该行后入口消失，阅读区恢复干净。
+        window.hover("chat-header", cx);
+        window.draw(cx).clear(cx);
+        assert!(
+            window.try_find("msg-copy-peer-2").is_none(),
+            "copy button disappears when hover leaves the row"
+        );
+    })
+    .unwrap();
+}
+
+/// hover 复制与拖选共存：先 hover 复制整条，再拖选 + Cmd+C 复制选区，
+/// 两条路径互不干扰。
+#[gpui_kit::test]
+fn hover_copy_and_drag_selection_coexist(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, _host) = common::open_window(cx, None, |window, cx| {
+        cx.new(|cx| {
+            let panel = cx.new(|cx| {
+                let mut p = ChatPanel::new(window, cx);
+                p.show("peer-b", vec![msg(2, "在的", false)], cx);
+                p
+            });
+            let sub = cx.subscribe(&panel, |_h, _p, _ev: &ChatPanelEvent, _cx| {});
+            Host { panel, _sub: sub }
+        })
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        window.hover("msg-row-peer-2", cx);
+        window.draw(cx).clear(cx);
+        window.click("msg-copy-peer-2", cx);
+        window.draw(cx).clear(cx);
+        let whole = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text().map(|text| text.to_string()));
+        assert_eq!(whole.as_deref(), Some("在的"));
+
+        // 拖选仍然能选中正文并 Cmd+C（按钮未拦截指针）。
+        select_bubble_text(window, "msg-peer-2", cx);
+        assert_eq!(TextSelection::selected_text(window, cx), "在的");
+        window.press("cmd-c", cx);
+        let selected = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text().map(|text| text.to_string()));
+        assert_eq!(selected.as_deref(), Some("在的"));
+    })
+    .unwrap();
+}
+
+/// 消息多到超出可视高度时必须能滚动：默认贴底（能看到最新一条），
+/// 向上滚动后能回到更早的消息。
+#[gpui_kit::test]
+fn long_message_list_scrolls_to_latest_and_back(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, _host) = common::open_window(cx, Some(size(px(700.), px(400.))), |window, cx| {
+        cx.new(|cx| {
+            let panel = cx.new(|cx| {
+                let mut p = ChatPanel::new(window, cx);
+                let messages: Vec<ChatMessage> = (1..=40)
+                    .map(|id| msg(id, &format!("消息 {id}"), false))
+                    .collect();
+                p.show("peer-b", messages, cx);
+                p
+            });
+            let sub = cx.subscribe(&panel, |_h, _p, _ev: &ChatPanelEvent, _cx| {});
+            Host { panel, _sub: sub }
+        })
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(
+            window.find("msg-peer-40").visible(),
+            "newest message should be visible after opening (scrolled to bottom)"
+        );
+        assert!(
+            !window
+                .try_find("msg-peer-1")
+                .expect("row registered")
+                .visible(),
+            "earliest message must be out of view before scrolling"
+        );
+
+        // 向上滚回顶部，最早的消息重新可见。
+        window.scroll(
+            "chat-messages",
+            ScrollDelta::Pixels(point(px(0.), px(20000.))),
+            cx,
+        );
+        window.draw(cx).clear(cx);
+        assert!(
+            window.find("msg-peer-1").visible(),
+            "scrolling up must bring the earliest message back into view"
+        );
     })
     .unwrap();
 }

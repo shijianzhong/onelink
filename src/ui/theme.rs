@@ -42,6 +42,9 @@ pub mod color {
     pub const AVATAR: u32 = 0xDCDCDC;
     /// 置灰的不可用控件（发送按钮空态）。
     pub const DISABLED: u32 = 0xD9D9D9;
+    /// 滚动条滑块：低对比细条，悬停时略深。
+    pub const SCROLL_THUMB: u32 = 0xC8C8C8;
+    pub const SCROLL_THUMB_HOVER: u32 = 0xAFAFAF;
 }
 
 /// 圆角档位。
@@ -94,4 +97,13 @@ pub mod size {
     pub const DEVICE_ROW_H: f32 = 64.;
     /// 设备头像边长。
     pub const AVATAR: f32 = 36.;
+    /// 滚动条：轨道宽度、滑块宽度与内缩。
+    pub const SCROLLBAR_TRACK_W: f32 = 8.;
+    pub const SCROLLBAR_W: f32 = 4.;
+    pub const SCROLLBAR_INSET: f32 = 2.;
+    /// 滚动条滑块最小高度，短列表里也抓得住。
+    pub const SCROLLBAR_MIN_H: f32 = 24.;
+    /// 消息 hover 复制按钮尺寸（固定宽高，避免「复制/已复制」切换时跳动）。
+    pub const COPY_BTN_W: f32 = 44.;
+    pub const COPY_BTN_H: f32 = 20.;
 }

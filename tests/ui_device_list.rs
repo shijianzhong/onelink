@@ -8,7 +8,8 @@ use gpui_kit::TestAppContext;
 use gpui_kit::prelude::*;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div,
+    Context, Entity, IntoElement, ParentElement, Render, ScrollDelta, Styled, Subscription, Window,
+    div, point, px,
 };
 use onelink::model::DeviceInfo;
 use onelink::net::UiEvent;
@@ -373,4 +374,85 @@ impl Render for SidebarHost {
                     .child(self.list.clone()),
             )
     }
+}
+
+/// 条目超过可视高度时：滚轮滚动后，之前够不到的会话能被点中（真实路径），
+/// 滚动条不挤压行宽，顶部区域不参与滚动。
+#[gpui_kit::test]
+fn long_device_list_scrolls_to_reach_early_sessions(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let events: Rc<RefCell<Vec<DeviceListEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&events);
+
+    // 固定小窗口：12 行 × 64px 远高于 240px 可视高度。
+    let (handle, _host) = common::open_window(
+        cx,
+        Some(gpui_kit::size(px(300.), px(240.))),
+        move |_window, cx| {
+            cx.new(move |cx| {
+                let list = cx.new(|cx| {
+                    let mut list = DeviceList::new(cx);
+                    let now = SystemTime::now();
+                    for i in 1..=12 {
+                        list.registry_mut().upsert(DeviceInfo {
+                            node_id: format!("n{i}"),
+                            // 补零保证按名字排序时 n12 真的排在最后。
+                            name: format!("设备{i:02}"),
+                            alias: None,
+                            addr: None,
+                            online: false,
+                            last_seen: now,
+                        });
+                    }
+                    list
+                });
+                let sub = cx.subscribe(&list, move |_h, _l, ev: &DeviceListEvent, _cx| {
+                    sink.borrow_mut().push(ev.clone());
+                });
+                RowClickHost { list, _sub: sub }
+            })
+        },
+    );
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        // 首行可见，行宽铺满侧栏扣掉内边距：300 - 8*2 = 284。
+        let first = window.find("device-n1").bounds();
+        assert_eq!(f32::from(first.size.width), 284.);
+        // 视口外的行已注册但不可见——这正是"早期会话选不到"的现象。
+        let last = window.try_find("device-n12").expect("row registered");
+        assert!(
+            !last.visible(),
+            "last row must be out of view before scrolling"
+        );
+
+        // 滚轮向下（GPUI 的向下 delta 为负）。
+        window.scroll(
+            "device-list",
+            ScrollDelta::Pixels(point(px(0.), px(-800.))),
+            cx,
+        );
+        window.draw(cx).clear(cx);
+
+        let last = window.find("device-n12");
+        assert!(
+            last.visible(),
+            "scrolling down must bring the last row into view"
+        );
+        assert!(
+            !window.find("device-n1").visible(),
+            "the top row must scroll out of view"
+        );
+        // 滚动条覆盖在右侧留白上，滚动前后行宽一致，不会被挤变形。
+        assert_eq!(f32::from(last.bounds().size.width), 284.);
+
+        // 真实路径：点中滚动后才露出的会话，事件必须落到它身上。
+        window.click("device-n12", cx);
+    })
+    .unwrap();
+
+    assert_eq!(
+        *events.borrow(),
+        vec![DeviceListEvent::Selected("n12".into())]
+    );
 }

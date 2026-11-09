@@ -9,12 +9,13 @@ use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::{
     Context, Entity, EventEmitter, FontWeight, IntoElement, KeyDownEvent, ParentElement, Render,
-    Styled, Subscription, Window, div, prelude::*, px, rgb,
+    ScrollHandle, Styled, Subscription, Window, div, prelude::*, px, rgb,
 };
 
 use crate::model::{DeviceInfo, DeviceRegistry, apply_ui_event};
 use crate::net::UiEvent;
 use crate::ui::theme::{color, radius, size, space, text};
+use crate::ui::thin_scrollbar;
 
 /// 设备列表向外抛的事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +44,8 @@ pub struct DeviceList {
     alias_input: Option<Entity<TextareaState>>,
     /// 编辑框事件订阅（Enter 提交）；退出编辑即 drop。
     _alias_sub: Option<Subscription>,
+    /// 列表滚动位置（滚动条显式常显，见 render 末尾）。
+    scroll: ScrollHandle,
 }
 
 impl DeviceList {
@@ -54,6 +57,7 @@ impl DeviceList {
             editing: None,
             alias_input: None,
             _alias_sub: None,
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -197,9 +201,12 @@ fn device_row(
         .flex()
         // 行宽由侧栏决定，不随名字长度收缩：显式占满列表可用宽度。
         .w_full()
+        // 固定行高不参与 flex 收缩：条目多于可视高度时改为滚动，而不是把行压扁。
+        .flex_shrink_0()
         .items_center()
         .gap(px(space::S3))
         .h(px(size::DEVICE_ROW_H))
+        .min_h(px(size::DEVICE_ROW_H))
         .px(px(space::S2))
         .rounded(px(radius::MD))
         .when(selected, |row| row.bg(rgb(color::SELECTED)))
@@ -331,6 +338,7 @@ fn alias_editor_row(
         .test_support()
         .flex()
         .w_full()
+        .flex_shrink_0()
         .items_center()
         .gap(px(space::S2))
         .h(px(size::DEVICE_ROW_H))
@@ -426,8 +434,12 @@ impl Render for DeviceList {
             .flex_col()
             // 列表铺满侧栏；行内再用 w_full 撑满扣掉内边距后的可用宽度。
             .w_full()
+            .h_full()
             .gap(px(2.))
             .p(px(space::S2))
+            // 品牌头在 render 外层固定，这里只让设备行滚动；滚动条覆盖在右侧留白上。
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .children(devices.iter().map(|d| {
                 if editing.as_deref() == Some(d.node_id.as_str())
                     && let Some(input) = &alias_input
@@ -438,5 +450,6 @@ impl Render for DeviceList {
                 let unread = unread_all.get(&d.node_id).copied().unwrap_or(0);
                 device_row(d, is_selected, unread, cx)
             }))
+            .child(thin_scrollbar(&self.scroll))
     }
 }
