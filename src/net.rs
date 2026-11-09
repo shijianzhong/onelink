@@ -1,14 +1,15 @@
 //! iroh 服务层与事件桥接：局域网设备发现 + 握手交换设备名 + 有界事件队列。
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1229,12 +1230,110 @@ async fn receive_into(
 
 /// 启动 iroh 服务线程：Endpoint(presets::N0，官方 relay 兜底) + mDNS 发现 +
 /// 连接 accept 循环。事件经有界队列暴露在 `handle.tx` 供 UI 轮询。
+///
+/// 每次调用都生成新的随机身份密钥（测试/临时实例用）；正式启动请用
+/// [`spawn_iroh_service_persistent`]，否则每次重启 node id 都会变。
 pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
     spawn_iroh_service_with_name(local_device_name())
 }
 
-/// 启动服务，握手时用调用方给的昵称（空串回退主机名）。
+/// 启动服务，握手时用调用方给的昵称（空串回退主机名），身份密钥随机。
 pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServiceHandle> {
+    spawn_iroh_service_inner(nickname, None)
+}
+
+/// 用持久化身份启动：密钥不存在时生成并写入 `key_path`，之后每次重启复用，
+/// 保证 node id 稳定（对端不会再把你当成一台新设备）。
+pub fn spawn_iroh_service_persistent(
+    nickname: String,
+    key_path: &Path,
+) -> anyhow::Result<IrohServiceHandle> {
+    let key = load_or_create_secret_key(key_path)?;
+    spawn_iroh_service_inner(nickname, Some(key))
+}
+
+/// 读取 endpoint 身份密钥；文件不存在时生成并落盘（0600）。
+///
+/// 文件损坏/长度不对时**报错**而不是重新生成：悄悄换掉身份会让用户在对端多出
+/// 一台"新设备"，历史会话也断掉，比启动失败更难排查。
+///
+/// 并发安全：首次创建先写临时文件并 fsync，再用 `hard_link` 原子地链到目标路径，
+/// 链接失败说明另一实例抢先创建，直接以磁盘上的密钥为准；同机多开不会互相截断。
+pub fn load_or_create_secret_key(path: &Path) -> anyhow::Result<SecretKey> {
+    match std::fs::read(path) {
+        Ok(bytes) => return key_from_bytes(path, &bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(anyhow::anyhow!(
+                "读取 endpoint 密钥失败（{}）: {err}",
+                path.display()
+            ));
+        }
+    }
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| anyhow::anyhow!("创建数据目录失败（{}）: {e}", dir.display()))?;
+    }
+
+    let key = SecretKey::generate();
+    // 临时文件名必须唯一：同进程多线程同时首次创建时，共用临时名会互相踩。
+    static KEY_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = KEY_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp{}-{seq}", std::process::id()));
+    write_secret_file(&tmp, &key.to_bytes())?;
+    let linked = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => {
+            tracing::info!(path = %path.display(), "已生成 endpoint 身份密钥");
+            Ok(key)
+        }
+        // 另一实例抢先创建：以磁盘上的那份为准，避免两个进程各用一把钥匙。
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let bytes = std::fs::read(path)?;
+            key_from_bytes(path, &bytes)
+        }
+        Err(err) => Err(anyhow::anyhow!(
+            "写入 endpoint 密钥失败（{}）: {err}",
+            path.display()
+        )),
+    }
+}
+
+fn key_from_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<SecretKey> {
+    let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "endpoint 密钥文件长度不对（{}，期望 32 字节）；请删除该文件后重新启动，\
+             但注意换钥会让对端把本机当成新设备",
+            path.display()
+        )
+    })?;
+    Ok(SecretKey::from_bytes(&arr))
+}
+
+/// 写密钥文件并同步到磁盘：权限 0600，先落盘再 chain 到最终路径。
+fn write_secret_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| anyhow::anyhow!("创建密钥临时文件失败（{}）: {e}", path.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| anyhow::anyhow!("写入密钥临时文件失败（{}）: {e}", path.display()))?;
+    Ok(())
+}
+
+fn spawn_iroh_service_inner(
+    nickname: String,
+    key: Option<SecretKey>,
+) -> anyhow::Result<IrohServiceHandle> {
     // 昵称优先取本地设置；为空则用主机名兜底。运行期可经 `set_own_name` 替换。
     let own_name: OwnName = Arc::new(std::sync::Mutex::new(normalize_own_name(&nickname)));
     let thread_own_name = Arc::clone(&own_name);
@@ -1257,8 +1356,13 @@ pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServ
             .build()
             .expect("failed to build tokio runtime");
         let result = rt.block_on(async move {
-            let endpoint = Endpoint::builder(presets::N0)
-                .alpns(vec![ALPN.to_vec(), FILE_ALPN.to_vec()])
+            let mut builder =
+                Endpoint::builder(presets::N0).alpns(vec![ALPN.to_vec(), FILE_ALPN.to_vec()]);
+            // 给了持久化密钥就固定身份；否则 iroh 每次 bind 现生成随机密钥。
+            if let Some(key) = key {
+                builder = builder.secret_key(key);
+            }
+            let endpoint = builder
                 .bind()
                 .await
                 .map_err(|e| anyhow::anyhow!("endpoint bind: {e}"))?;

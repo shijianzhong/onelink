@@ -32,6 +32,13 @@ pub fn db_path() -> PathBuf {
     data_dir().join("onelink.db")
 }
 
+/// endpoint 身份密钥文件（与 `onelink.db` 同目录；首次启动生成，权限 0600）。
+///
+/// 密钥决定 node id：丢了/换了，对端会把你当成一台新设备，历史会话也会断。
+pub fn endpoint_key_path() -> PathBuf {
+    data_dir().join("endpoint.key")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

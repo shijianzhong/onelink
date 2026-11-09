@@ -228,3 +228,28 @@ fn corrupt_database_is_backed_up_and_rebuilt() {
     let (_store, loaded) = Store::open(&path);
     assert_eq!(loaded.devices.len(), 1);
 }
+
+#[test]
+fn deleting_device_drops_row_history_and_stays_gone_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("onelink.db");
+
+    {
+        let (store, _) = Store::open(&path);
+        store.upsert_device(&device("old", "书房Mac"));
+        store.upsert_device(&device("keep", "客厅Mac"));
+        store.insert_message("old", &message(1, "旧会话", false, MessageStatus::Pending));
+        store.insert_message("keep", &message(1, "留着", false, MessageStatus::Pending));
+        store.delete_device("old");
+    }
+
+    // 重启：被删的设备与其历史都不应再出现（否则"删了又冒出来"）。
+    let (_store, loaded) = Store::open(&path);
+    assert_eq!(loaded.devices.len(), 1);
+    assert_eq!(loaded.devices[0].node_id, "keep");
+    assert!(
+        !loaded.histories.contains_key("old"),
+        "删除设备应同时删掉它的历史消息"
+    );
+    assert!(loaded.histories.contains_key("keep"));
+}

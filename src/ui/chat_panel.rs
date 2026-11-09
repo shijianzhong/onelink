@@ -152,6 +152,16 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// 回到空态（删除当前选中的设备时调用）。
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.peer = None;
+        self.peer_name = None;
+        self.messages.clear();
+        self.transfers.clear();
+        self.error = None;
+        cx.notify();
+    }
+
     /// 测试与预填用：直接设置输入框文本。
     pub fn set_input_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |state, cx| {

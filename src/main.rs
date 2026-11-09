@@ -33,8 +33,10 @@ fn main() {
     let (store, loaded) = onelink::store::Store::open(&onelink::paths::db_path());
     let nickname = loaded.self_nickname.clone().unwrap_or_default();
     // 启动 iroh 服务（endpoint + mDNS 发现 + 握手），事件队列交给 UI 事件泵。
+    // 身份密钥持久化：node id 跨重启不变，对端不会把本机当成一台新设备。
     let service = Arc::new(
-        onelink::net::spawn_iroh_service_with_name(nickname).expect("failed to spawn iroh service"),
+        onelink::net::spawn_iroh_service_persistent(nickname, &onelink::paths::endpoint_key_path())
+            .expect("failed to spawn iroh service"),
     );
     let shutdown_handle = Arc::clone(&service);
     gpui_kit::application()

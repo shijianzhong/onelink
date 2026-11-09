@@ -128,6 +128,19 @@ impl App {
                 }
                 // 取消编辑不产生任何写入。
                 DeviceListEvent::AliasCancelled => {}
+                // 删除离线设备：设备行 + 会话 + 历史消息一并删除（UI 已二次确认，不可撤销）。
+                DeviceListEvent::DeleteRequested(node_id) => {
+                    let was_selected = this.chat_store.selected() == Some(node_id.as_str());
+                    this.chat_store.forget(node_id.as_str());
+                    this.transfers.remove(node_id);
+                    this.store.delete_device(node_id.as_str());
+                    this.device_list
+                        .update(cx, |list, cx| list.forget(node_id.as_str(), cx));
+                    if was_selected {
+                        this.chat_panel.update(cx, |panel, cx| panel.clear(cx));
+                    }
+                    cx.notify();
+                }
             },
         );
 

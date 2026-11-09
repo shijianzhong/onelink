@@ -29,6 +29,8 @@ pub enum DeviceListEvent {
     },
     /// 用户取消了备注编辑（不写库）。
     AliasCancelled,
+    /// 用户确认删除某台离线设备（设备行 + 会话 + 历史消息一并删除，不可撤销）。
+    DeleteRequested(String),
 }
 
 impl EventEmitter<DeviceListEvent> for DeviceList {}
@@ -44,6 +46,8 @@ pub struct DeviceList {
     alias_input: Option<Entity<TextareaState>>,
     /// 编辑框事件订阅（Enter 提交）；退出编辑即 drop。
     _alias_sub: Option<Subscription>,
+    /// 正在等二次确认删除的 node id（删除不可撤销，避免误点）。
+    confirm_delete: Option<String>,
     /// 列表滚动位置（滚动条显式常显，见 render 末尾）。
     scroll: ScrollHandle,
 }
@@ -57,6 +61,7 @@ impl DeviceList {
             editing: None,
             alias_input: None,
             _alias_sub: None,
+            confirm_delete: None,
             scroll: ScrollHandle::new(),
         }
     }
@@ -168,17 +173,51 @@ impl DeviceList {
         cx.notify();
         cx.emit(DeviceListEvent::AliasCancelled);
     }
+
+    /// 第一次点"删除"：进入二次确认态，不删任何东西。
+    fn ask_delete(&mut self, node_id: &str, cx: &mut Context<Self>) {
+        self.confirm_delete = Some(node_id.to_string());
+        cx.notify();
+    }
+
+    /// 取消二次确认。
+    fn cancel_delete(&mut self, cx: &mut Context<Self>) {
+        if self.confirm_delete.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// 删除已在 `App` 侧落库完成：把设备从列表与本地状态里移除。
+    pub fn forget(&mut self, node_id: &str, cx: &mut Context<Self>) {
+        let _ = self.registry.remove(node_id);
+        let _ = self.unread.remove(node_id);
+        if self.selected.as_deref() == Some(node_id) {
+            self.selected = None;
+        }
+        if self.editing.as_deref() == Some(node_id) {
+            self.editing = None;
+            self.alias_input = None;
+            self._alias_sub = None;
+        }
+        if self.confirm_delete.as_deref() == Some(node_id) {
+            self.confirm_delete = None;
+        }
+        cx.notify();
+    }
 }
 
-/// 一行设备：头像（名字首字）+ 名字/短 id + 未读角标。
+/// 一行设备：头像（名字首字）+ 名字/短 id + 未读角标；离线行可删除。
 fn device_row(
     device: &DeviceInfo,
     selected: bool,
     unread: u32,
+    confirm_delete: bool,
     cx: &mut Context<DeviceList>,
 ) -> gpui_kit::AnyElement {
     let device_id = device.node_id.clone();
     let edit_id = device.node_id.clone();
+    let delete_id = device.node_id.clone();
+    let cancel_id = device.node_id.clone();
     let initial = device
         .display_name()
         .chars()
@@ -283,6 +322,65 @@ fn device_row(
                     this.begin_alias_edit(&edit_id, window, cx);
                 })),
         )
+        // 删除：只对离线设备开放——在线设备删掉会立刻被 mDNS 重新发现，等于没删。
+        .when(!device.online, |row| {
+            if confirm_delete {
+                row.child(
+                    div()
+                        .id(format!("delete-confirm-{delete_id}"))
+                        .test_support()
+                        .aria_label("确认删除")
+                        .flex_shrink_0()
+                        .px(px(space::S1))
+                        .rounded(px(radius::SM))
+                        .text_size(px(text::CAPTION))
+                        .text_color(rgb(color::DANGER))
+                        .hover(|el| el.bg(rgb(color::DANGER_BG)))
+                        .child("确认删除")
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                            this.confirm_delete = None;
+                            cx.notify();
+                            cx.emit(DeviceListEvent::DeleteRequested(delete_id.clone()));
+                        })),
+                )
+                .child(
+                    div()
+                        .id(format!("delete-cancel-{cancel_id}"))
+                        .test_support()
+                        .aria_label("取消删除")
+                        .flex_shrink_0()
+                        .px(px(space::S1))
+                        .rounded(px(radius::SM))
+                        .text_size(px(text::CAPTION))
+                        .text_color(rgb(color::TEXT_MUTED))
+                        .hover(|el| el.text_color(rgb(color::TEXT_SECONDARY)))
+                        .child("取消")
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                            this.cancel_delete(cx);
+                        })),
+                )
+            } else {
+                row.child(
+                    div()
+                        .id(format!("delete-{delete_id}"))
+                        .test_support()
+                        .aria_label("删除设备")
+                        .flex_shrink_0()
+                        .px(px(space::S1))
+                        .rounded(px(radius::SM))
+                        .text_size(px(text::CAPTION))
+                        .text_color(rgb(color::TEXT_MUTED))
+                        .hover(|el| el.text_color(rgb(color::DANGER)))
+                        .child("删除")
+                        .on_click(cx.listener(move |this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                            this.ask_delete(&delete_id, cx);
+                        })),
+                )
+            }
+        })
         .when(unread > 0, |row| {
             row.child(
                 div()
@@ -399,6 +497,7 @@ impl Render for DeviceList {
         let alias_input = self.alias_input.clone();
         let unread_all = self.unread.clone();
         let selected = self.selected.clone();
+        let confirm_delete = self.confirm_delete.clone();
 
         if devices.is_empty() {
             return div()
@@ -448,7 +547,8 @@ impl Render for DeviceList {
                 }
                 let is_selected = selected.as_deref() == Some(d.node_id.as_str());
                 let unread = unread_all.get(&d.node_id).copied().unwrap_or(0);
-                device_row(d, is_selected, unread, cx)
+                let confirming = confirm_delete.as_deref() == Some(d.node_id.as_str());
+                device_row(d, is_selected, unread, confirming, cx)
             }));
 
         // 滚动条放在滚动容器之外：它自己是 100%×100% 的绝对定位覆盖层，

@@ -43,6 +43,8 @@ enum Command {
         last_seen: SystemTime,
     },
     SetSelfNickname(String),
+    /// 删除设备，连同它的会话与消息（不可撤销）。
+    DeleteDevice(String),
 }
 
 /// 持久化句柄。写入异步投递到后台线程；`Drop` 时关闭通道并 join，保证已投递命令落盘。
@@ -129,6 +131,11 @@ impl Store {
         self.send(Command::SetSelfNickname(nickname.to_string()));
     }
 
+    /// 删除设备（离线设备的清理入口）：设备行、会话、历史消息一起删，不可撤销。
+    pub fn delete_device(&self, node_id: &str) {
+        self.send(Command::DeleteDevice(node_id.to_string()));
+    }
+
     fn send(&self, cmd: Command) {
         if let Some(tx) = &self.tx
             && let Err(err) = tx.send(cmd)
@@ -200,6 +207,7 @@ fn apply(conn: &Connection, cmd: Command) -> anyhow::Result<()> {
             rows::set_last_seen(conn, &node_id, last_seen)
         }
         Command::SetSelfNickname(nickname) => rows::set_self_nickname(conn, &nickname),
+        Command::DeleteDevice(node_id) => rows::delete_device(conn, &node_id),
     }
 }
 

@@ -118,6 +118,22 @@ pub fn set_alias(conn: &Connection, node_id: &str, alias: Option<&str>) -> Resul
     Ok(())
 }
 
+/// 删除一台设备及其会话与历史消息（同一事务，避免留下孤儿数据）。
+pub fn delete_device(conn: &Connection, node_id: &str) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM messages WHERE peer_node_id = ?1",
+        params![node_id],
+    )?;
+    tx.execute(
+        "DELETE FROM conversations WHERE peer_node_id = ?1",
+        params![node_id],
+    )?;
+    tx.execute("DELETE FROM devices WHERE node_id = ?1", params![node_id])?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// 消息入库（同一 peer/direction/msg_id 重复时静默丢弃），并推进会话末尾时间。
 pub fn insert_message(conn: &Connection, peer: &str, msg: &ChatMessage) -> Result<()> {
     conn.execute(

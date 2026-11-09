@@ -135,6 +135,14 @@ impl ChatStore {
         true
     }
 
+    /// 删除设备时同步丢弃它的会话（内存侧；落库由 `Store::delete_device` 做）。
+    pub fn forget(&mut self, peer: &str) {
+        self.conversations.remove(peer);
+        if self.selected.as_deref() == Some(peer) {
+            self.selected = None;
+        }
+    }
+
     /// 所有会话的 peer id（BTreeMap 保证字典序）。
     pub fn peers(&self) -> Vec<String> {
         self.conversations.keys().cloned().collect()

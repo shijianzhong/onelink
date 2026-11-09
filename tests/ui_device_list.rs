@@ -515,3 +515,68 @@ fn short_device_list_has_no_scrollbar(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+/// 删除入口只对离线设备出现；第一次点击进入确认态，二次确认才抛删除事件。
+#[gpui_kit::test]
+fn delete_needs_second_click_and_is_offline_only(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let events: Rc<RefCell<Vec<DeviceListEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&events);
+
+    let (handle, _host) = common::open_window(cx, None, move |_window, cx| {
+        cx.new(move |cx| {
+            let list = cx.new(|cx| {
+                let mut list = DeviceList::new(cx);
+                list.registry_mut().upsert(DeviceInfo {
+                    node_id: "online".into(),
+                    name: "书房Mac".into(),
+                    alias: None,
+                    addr: None,
+                    online: true,
+                    last_seen: SystemTime::now(),
+                });
+                list.registry_mut().upsert(DeviceInfo {
+                    node_id: "offline".into(),
+                    name: "云主机".into(),
+                    alias: None,
+                    addr: None,
+                    online: false,
+                    last_seen: SystemTime::now(),
+                });
+                list
+            });
+            let sub = cx.subscribe(&list, move |_h, _l, ev: &DeviceListEvent, _cx| {
+                sink.borrow_mut().push(ev.clone());
+            });
+            RowClickHost { list, _sub: sub }
+        })
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(
+            window.try_find("delete-online").is_none(),
+            "在线设备不提供删除入口"
+        );
+        window.click("delete-offline", cx);
+    })
+    .unwrap();
+
+    // 第一次点击只进入确认态，不应产生删除事件。
+    assert!(events.borrow().is_empty(), "第一次点击不能直接删");
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(
+            window.try_find("delete-confirm-offline").is_some(),
+            "应显示确认删除"
+        );
+        window.click("delete-confirm-offline", cx);
+    })
+    .unwrap();
+
+    assert_eq!(
+        *events.borrow(),
+        vec![DeviceListEvent::DeleteRequested("offline".into())]
+    );
+}
