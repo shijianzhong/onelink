@@ -456,3 +456,62 @@ fn long_device_list_scrolls_to_reach_early_sessions(cx: &mut TestAppContext) {
         vec![DeviceListEvent::Selected("n12".into())]
     );
 }
+
+/// 少量设备（不满一屏）：不该出现滚动条，滚轮与轨道点击都不能推动行位置。
+#[gpui_kit::test]
+fn short_device_list_has_no_scrollbar(cx: &mut TestAppContext) {
+    let (handle, _list) = common::open_window(
+        cx,
+        Some(gpui_kit::size(px(300.), px(240.))),
+        |_window, cx| {
+            cx.new(|cx| {
+                let mut list = DeviceList::new(cx);
+                let now = SystemTime::now();
+                for i in 1..=3 {
+                    list.registry_mut().upsert(DeviceInfo {
+                        node_id: format!("n{i}"),
+                        name: format!("设备{i:02}"),
+                        alias: None,
+                        addr: None,
+                        online: false,
+                        last_seen: now,
+                    });
+                }
+                list
+            })
+        },
+    );
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        // 3 行 + 间距 + 内边距 ≈ 212px，低于 240px 可视高度。
+        let list = window.find("device-list").bounds();
+        let first = window.find("device-n1").bounds();
+
+        window.scroll(
+            "device-list",
+            ScrollDelta::Pixels(point(px(0.), px(-800.))),
+            cx,
+        );
+        window.draw(cx).clear(cx);
+        assert_eq!(
+            first,
+            window.find("device-n1").bounds(),
+            "short device list must not scroll"
+        );
+
+        // 滚动条轨道位于列表右缘内侧：没有溢出时点击不应产生位移。
+        window.click_at(
+            "device-list",
+            point(list.size.width - px(4.), list.size.height / 2.),
+            cx,
+        );
+        window.draw(cx).clear(cx);
+        assert_eq!(
+            first,
+            window.find("device-n1").bounds(),
+            "short device list must not have a draggable scrollbar track"
+        );
+    })
+    .unwrap();
+}

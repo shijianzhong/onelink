@@ -562,6 +562,134 @@ fn long_message_list_scrolls_to_latest_and_back(cx: &mut TestAppContext) {
             window.find("msg-peer-1").visible(),
             "scrolling up must bring the earliest message back into view"
         );
+
+        // 有溢出时滚动条是可见且可交互的：点轨道底部回到最新消息。
+        let list = window.find("chat-messages").bounds();
+        window.click_at(
+            "chat-messages",
+            point(list.size.width - px(4.), list.size.height - px(8.)),
+            cx,
+        );
+        window.draw(cx).clear(cx);
+        assert!(
+            window.find("msg-peer-40").visible(),
+            "scrollbar track click must jump back to the newest message"
+        );
+    })
+    .unwrap();
+}
+
+/// 空会话：没有消息时既不能出现滚动条，也不能有奇怪空白——提示语在可视区垂直居中。
+#[gpui_kit::test]
+fn empty_conversation_has_no_scrollbar(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, _host) = common::open_window(cx, Some(size(px(600.), px(420.))), |window, cx| {
+        cx.new(|cx| {
+            let panel = cx.new(|cx| {
+                let mut p = ChatPanel::new(window, cx);
+                p.show("peer-b", Vec::new(), cx);
+                p
+            });
+            let sub = cx.subscribe(&panel, |_h, _p, _ev: &ChatPanelEvent, _cx| {});
+            Host { panel, _sub: sub }
+        })
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        window.draw(cx).clear(cx);
+        let list = window.find("chat-messages").bounds();
+        let hint = window.find("chat-empty").bounds();
+
+        // 提示语垂直居中：内容刚好铺满可视高度，不会撑出滚动范围。
+        let list_center = list.origin.y + list.size.height / 2.;
+        let hint_center = hint.origin.y + hint.size.height / 2.;
+        assert!(
+            (f32::from(hint_center - list_center)).abs() <= 1.,
+            "empty hint should be vertically centered: hint {hint:?}, list {list:?}"
+        );
+
+        // 滚动条轨道位于列表右缘内侧：不可滚动时，滚轮与轨道点击都不该让内容移动。
+        window.scroll(
+            "chat-messages",
+            ScrollDelta::Pixels(point(px(0.), px(-1000.))),
+            cx,
+        );
+        window.draw(cx).clear(cx);
+        assert_eq!(
+            hint,
+            window.find("chat-empty").bounds(),
+            "empty conversation must not scroll"
+        );
+
+        window.click_at(
+            "chat-messages",
+            point(list.size.width - px(4.), list.size.height / 2.),
+            cx,
+        );
+        window.draw(cx).clear(cx);
+        assert_eq!(
+            hint,
+            window.find("chat-empty").bounds(),
+            "empty conversation must not have a draggable scrollbar track"
+        );
+    })
+    .unwrap();
+}
+
+/// 少量消息（不满一屏）：同样不该出现滚动条，消息位置不能被滚轮/轨道点击推动。
+#[gpui_kit::test]
+fn short_conversation_has_no_scrollbar(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, _host) = common::open_window(cx, Some(size(px(600.), px(420.))), |window, cx| {
+        cx.new(|cx| {
+            let panel = cx.new(|cx| {
+                let mut p = ChatPanel::new(window, cx);
+                p.show(
+                    "peer-b",
+                    vec![msg(1, "第一条", false), msg(2, "第二条", true)],
+                    cx,
+                );
+                p
+            });
+            let sub = cx.subscribe(&panel, |_h, _p, _ev: &ChatPanelEvent, _cx| {});
+            Host { panel, _sub: sub }
+        })
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        window.draw(cx).clear(cx);
+        assert!(
+            window.try_find("chat-empty").is_none(),
+            "messages present, no empty hint"
+        );
+        let list = window.find("chat-messages").bounds();
+        let first = window.find("msg-peer-1").bounds();
+
+        window.scroll(
+            "chat-messages",
+            ScrollDelta::Pixels(point(px(0.), px(-1000.))),
+            cx,
+        );
+        window.draw(cx).clear(cx);
+        assert_eq!(
+            first,
+            window.find("msg-peer-1").bounds(),
+            "short conversation must not scroll"
+        );
+
+        window.click_at(
+            "chat-messages",
+            point(list.size.width - px(4.), list.size.height / 2.),
+            cx,
+        );
+        window.draw(cx).clear(cx);
+        assert_eq!(
+            first,
+            window.find("msg-peer-1").bounds(),
+            "short conversation must not have a draggable scrollbar track"
+        );
     })
     .unwrap();
 }

@@ -418,6 +418,9 @@ impl Render for ChatPanel {
         if self.messages.is_empty() {
             list = list.child(
                 div()
+                    .id("chat-empty")
+                    .test_support()
+                    .aria_label("还没有消息，发一条试试")
                     .flex_1()
                     .flex()
                     .items_center()
@@ -433,7 +436,21 @@ impl Render for ChatPanel {
             let copied = self.copied_message == Some(key);
             list = list.child(message_row(msg, hovered, copied, cx));
         }
-        list = list.child(thin_scrollbar(&self.messages_scroll));
+
+        // 滚动条必须是滚动容器的兄弟节点，而不能是它的子节点：`Scrollbar` 自身是
+        // 100%×100% 的绝对定位元素，一旦作为子元素参与 `content_size` 的并集计算，
+        // 就会凭空把内边距算成可滚动范围，内容不满一屏也会冒出滚动条。
+        // 外层只负责定位（relative）和撑满高度，本身不滚动。
+        let messages = div()
+            .id("chat-messages-viewport")
+            .test_support()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.))
+            .child(list)
+            .child(thin_scrollbar(&self.messages_scroll));
 
         let transfers = (!self.transfers.is_empty()).then(|| {
             let mut block = div()
@@ -543,7 +560,7 @@ impl Render for ChatPanel {
                             .child(subtitle),
                     ),
             )
-            .child(list)
+            .child(messages)
             .when_some(transfers, |el, block| el.child(block))
             .when_some(error_row, |el, row| el.child(row))
             .child(

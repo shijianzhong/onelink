@@ -427,7 +427,7 @@ impl Render for DeviceList {
                 );
         }
 
-        div()
+        let rows = div()
             .id("device-list")
             .test_support()
             .flex()
@@ -449,7 +449,17 @@ impl Render for DeviceList {
                 let is_selected = selected.as_deref() == Some(d.node_id.as_str());
                 let unread = unread_all.get(&d.node_id).copied().unwrap_or(0);
                 device_row(d, is_selected, unread, cx)
-            }))
+            }));
+
+        // 滚动条放在滚动容器之外：它自己是 100%×100% 的绝对定位覆盖层，
+        // 若作为滚动容器的子节点会把内边距算进内容尺寸，行数不满一屏也会显示滚动条。
+        div()
+            .id("device-list-viewport")
+            .test_support()
+            .relative()
+            .w_full()
+            .h_full()
+            .child(rows)
             .child(thin_scrollbar(&self.scroll))
     }
 }
