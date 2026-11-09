@@ -5,16 +5,24 @@
 
 use std::path::PathBuf;
 
-use gpui_kit::base::TestSupportExt;
+use gpui_kit::base::input::Copy;
+use gpui_kit::base::{SelectableText, TestSupportExt, TextSelection};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, ExternalPaths, FontWeight, IntoElement, ParentElement,
-    Render, Styled, Subscription, Window, div, prelude::*, px, rgb,
+    App, ClipboardItem, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, FontWeight,
+    IntoElement, KeyBinding, MouseButton, MouseDownEvent, ParentElement, Render, Styled,
+    Subscription, Window, actions, div, prelude::*, px, rgb,
 };
 
 use crate::chat::ChatMessage;
 use crate::ui::theme::{color, radius, size, space, text};
 use crate::ui::transfer_row::{self, TransferView};
+
+actions!(chat_panel, [SendMessage]);
+
+/// 消息区获得焦点后的键位上下文：选中消息文字后 Cmd/Ctrl+C 复制选区、
+/// Enter 继续发送（此时输入框已失焦，靠这里的绑定兜住既有交互）。
+const CHAT_CONTEXT: &str = "ChatPanel";
 
 /// 面板向外抛的事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +53,8 @@ pub struct ChatPanel {
     error: Option<String>,
     /// 输入框事件订阅（仅 Enter 发送）。
     _input_sub: Subscription,
+    /// 消息区焦点：拖选/点击消息时把焦点移到这里，让 Cmd+C 走面板的复制绑定。
+    focus_handle: FocusHandle,
 }
 
 impl ChatPanel {
@@ -65,6 +75,13 @@ impl ChatPanel {
                 }
             },
         );
+        let focus_handle = cx.focus_handle();
+        cx.bind_keys([
+            KeyBinding::new("cmd-c", Copy, Some(CHAT_CONTEXT)),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("ctrl-c", Copy, Some(CHAT_CONTEXT)),
+            KeyBinding::new("enter", SendMessage, Some(CHAT_CONTEXT)),
+        ]);
         Self {
             input,
             peer: None,
@@ -73,6 +90,7 @@ impl ChatPanel {
             transfers: Vec::new(),
             error: None,
             _input_sub: input_sub,
+            focus_handle,
         }
     }
 
@@ -141,6 +159,21 @@ impl ChatPanel {
         self.error = None;
         cx.emit(ChatPanelEvent::Send(text));
     }
+
+    /// 面板获得焦点时的复制：复制窗口级文本选区（消息正文）。
+    fn copy_selected(&mut self, _: &Copy, window: &mut Window, cx: &mut Context<Self>) {
+        let text = TextSelection::selected_text(window, cx).trim().to_string();
+        if text.is_empty() {
+            cx.propagate();
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    /// 面板获得焦点时的 Enter：维持「Enter 发送」。
+    fn send_on_enter(&mut self, _: &SendMessage, window: &mut Window, cx: &mut Context<Self>) {
+        self.send(window, cx);
+    }
 }
 
 /// 把毫秒时间戳格式化成 `HH:MM`。
@@ -153,7 +186,7 @@ fn clock(sent_at_ms: u64) -> String {
     format!("{hour:02}:{minute:02}")
 }
 
-fn message_row(msg: &ChatMessage) -> impl IntoElement {
+fn message_row(msg: &ChatMessage, cx: &mut Context<ChatPanel>) -> impl IntoElement {
     // 双方 id 空间独立，同一数字 id 会在同一会话里出现；element id 必须带方向前缀。
     let side = if msg.mine { "mine" } else { "peer" };
     let bubble = div()
@@ -166,7 +199,20 @@ fn message_row(msg: &ChatMessage) -> impl IntoElement {
         .max_w(px(size::BUBBLE_MAX_W))
         .line_height(px(size::MESSAGE_LINE_H))
         .text_size(px(text::MESSAGE))
-        .child(msg.text.clone());
+        // 点到消息正文时把焦点从输入框移到消息区：输入框会抢先消费 Cmd+C，
+        // 焦点在这里时复制才会落到窗口级选区上（Enter 由面板的同名上下文兜住）。
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.focus_handle.focus(window, cx);
+            }),
+        )
+        // 正文用 `SelectableText`：普通文本元素不支持选择，而它直接参与窗口级
+        // `TextSelection`（Root 已渲染选择层并绑定 Cmd/Ctrl+C 复制）。
+        .child(SelectableText::new(
+            format!("msg-text-{side}-{}", msg.id),
+            msg.text.clone(),
+        ));
 
     div()
         .flex()
@@ -244,7 +290,7 @@ impl Render for ChatPanel {
             );
         }
         for msg in &self.messages {
-            list = list.child(message_row(msg));
+            list = list.child(message_row(msg, cx));
         }
 
         let transfers = (!self.transfers.is_empty()).then(|| {
@@ -320,6 +366,10 @@ impl Render for ChatPanel {
         div()
             .id("chat-panel")
             .test_support()
+            .track_focus(&self.focus_handle)
+            .key_context(CHAT_CONTEXT)
+            .on_action(cx.listener(Self::copy_selected))
+            .on_action(cx.listener(Self::send_on_enter))
             .flex()
             .flex_col()
             .size_full()

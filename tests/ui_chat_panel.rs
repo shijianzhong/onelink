@@ -4,10 +4,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui_kit::TestAppContext;
+use gpui_kit::base::TextSelection;
 use gpui_kit::prelude::*;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div,
+    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div, point,
+    px,
 };
 use onelink::chat::{ChatMessage, MessageStatus};
 use onelink::ui::chat_panel::{ChatPanel, ChatPanelEvent};
@@ -306,6 +308,94 @@ fn error_hint_shows_and_clears(cx: &mut TestAppContext) {
             window.try_find("chat-error").is_none(),
             "hint should be gone"
         );
+    })
+    .unwrap();
+}
+
+/// 在气泡内从左到右拖选，覆盖整条正文文字。
+fn select_bubble_text(window: &mut Window, id: &'static str, cx: &mut gpui_kit::App) {
+    let bubble = window.find(id).bounds();
+    let y = bubble.origin.y + bubble.size.height * 0.5;
+    let from = point(bubble.origin.x + px(13.), y);
+    let to = point(bubble.origin.x + bubble.size.width - px(13.), y);
+    window.drag(from, to, cx);
+    window.draw(cx).clear(cx);
+}
+
+#[gpui_kit::test]
+fn message_text_is_selectable_and_copyable(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (handle, _host) = common::open_window(cx, None, |window, cx| {
+        cx.new(|cx| {
+            let panel = cx.new(|cx| {
+                let mut p = ChatPanel::new(window, cx);
+                p.show("peer-b", vec![msg(2, "在的", false)], cx);
+                p
+            });
+            let sub = cx.subscribe(&panel, |_h, _p, _ev: &ChatPanelEvent, _cx| {});
+            Host { panel, _sub: sub }
+        })
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        select_bubble_text(window, "msg-peer-2", cx);
+        assert_eq!(
+            TextSelection::selected_text(window, cx),
+            "在的",
+            "selected text should be the whole message"
+        );
+
+        // 选中消息会把焦点移到消息区，Cmd+C 走 ChatPanel 的复制绑定写剪贴板。
+        window.press("cmd-c", cx);
+        let copied = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text().map(|text| text.to_string()));
+        assert_eq!(copied.as_deref(), Some("在的"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn selecting_message_keeps_enter_sending(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let events: Rc<RefCell<Vec<ChatPanelEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&events);
+
+    let (handle, host) = common::open_window(cx, None, move |window, cx| {
+        cx.new(move |cx| {
+            let panel = cx.new(|cx| {
+                let mut p = ChatPanel::new(window, cx);
+                p.show("peer-b", vec![msg(2, "在的", false)], cx);
+                p
+            });
+            let sub = cx.subscribe(&panel, move |_h, _p, ev: &ChatPanelEvent, _cx| {
+                sink.borrow_mut().push(ev.clone());
+            });
+            Host { panel, _sub: sub }
+        })
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        window.click("chat-input", cx);
+        window.input("hi", cx);
+        window.draw(cx).clear(cx);
+
+        // 选中消息文字后焦点离开输入框，但 Enter 仍必须能发送草稿。
+        select_bubble_text(window, "msg-peer-2", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+
+    assert_eq!(
+        *events.borrow(),
+        vec![ChatPanelEvent::Send("hi".into())],
+        "Enter must still send after selecting message text"
+    );
+    cx.update_window(handle.into(), |_, _, cx| {
+        let left = host.read(cx).panel.read(cx).input_text(cx);
+        assert!(left.is_empty(), "input should be cleared, got {left:?}");
     })
     .unwrap();
 }
