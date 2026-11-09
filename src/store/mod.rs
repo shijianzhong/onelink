@@ -140,7 +140,7 @@ impl Store {
 
 impl Drop for Store {
     fn drop(&mut self) {
-        // 关闭通道后后台线程会把已排队的命令执行完再退出。
+        // 关闭通道后后台线程会把已排队的命令执行完再退出：关窗不丢未落盘的数据。
         self.tx.take();
         if let Some(join) = self.join.take()
             && let Err(err) = join.join()

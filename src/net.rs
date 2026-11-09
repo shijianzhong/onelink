@@ -200,11 +200,36 @@ pub struct IrohServiceHandle {
     alive: Arc<AtomicBool>,
     /// 服务线程 join 句柄（take 后不可重复 join）。
     join: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// 服务线程退出时发一个空信号，供关闭路径按宽限期等待。
+    finished: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     /// 运行期可换的对外昵称（握手应答/主动握手都读它）。
     own_name: OwnName,
 }
 
 impl IrohServiceHandle {
+    /// 请求停止并最多等 `grace`：超时就放弃优雅关闭（线程自行收尾，不再 join）。
+    ///
+    /// 返回 true 表示服务线程已在宽限内退出。幂等：重复调用直接按存活状态返回。
+    pub fn shutdown(&self, grace: Duration) -> bool {
+        self.stop.store(true, Ordering::SeqCst);
+        let finished = match self
+            .finished
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            Some(rx) => rx.recv_timeout(grace).is_ok(),
+            None => !self.alive.load(Ordering::SeqCst),
+        };
+        let join = self.join.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(join) = join
+            && finished
+        {
+            let _ = join.join();
+        }
+        finished
+    }
+
     pub fn is_running(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
     }
@@ -648,13 +673,24 @@ async fn run_command(
     }
 }
 
-/// 停止服务线程并等待其收尾（close endpoint + runtime 退出）。
+/// 退出时等待服务线程收尾的宽限期：内部 endpoint close 800ms + runtime 500ms 已各自限时，
+/// 这里再兜一层，保证关闭路径不会无限挂住。
+pub const SHUTDOWN_GRACE: Duration = Duration::from_millis(1500);
+
+/// 停止服务线程并等待其收尾（close endpoint + runtime 退出）；超过宽限期就放弃优雅关闭。
 /// 幂等：第二次调用直接返回。
 pub fn shutdown_iroh_service(handle: &IrohServiceHandle) {
-    handle.stop.store(true, Ordering::SeqCst);
-    let join = handle.join.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if let Some(join) = join {
-        let _ = join.join();
+    let t = Instant::now();
+    if handle.shutdown(SHUTDOWN_GRACE) {
+        tracing::info!(
+            elapsed_ms = t.elapsed().as_millis(),
+            "iroh service shut down"
+        );
+    } else {
+        tracing::warn!(
+            elapsed_ms = t.elapsed().as_millis(),
+            "iroh service did not stop within grace; abandoning graceful close"
+        );
     }
 }
 
@@ -1214,6 +1250,7 @@ pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServ
     let (commands_tx, mut commands_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
     let thread_stop = Arc::clone(&stop);
     let thread_alive = Arc::clone(&alive);
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel::<()>();
     let join = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1342,12 +1379,17 @@ pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServ
                     }
                 }
             }
+            let t = Instant::now();
             mdns_task.abort();
             serve_task.abort();
             // close 要等 relay/QUIC 收尾，正常网络下 <300ms，但弱网可能久；
             // 退出路径不为此卡住 UI，超时就交给 runtime 限时关闭。
             let closed = tokio::time::timeout(Duration::from_millis(800), endpoint.close()).await;
-            tracing::info!(?closed, "endpoint close attempted, service thread exiting");
+            tracing::info!(
+                ?closed,
+                elapsed_ms = t.elapsed().as_millis(),
+                "endpoint close attempted, service thread exiting"
+            );
             Ok::<(), anyhow::Error>(())
         });
         if let Err(e) = result {
@@ -1355,6 +1397,8 @@ pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServ
         }
         rt.shutdown_timeout(Duration::from_millis(500));
         thread_alive.store(false, Ordering::SeqCst);
+        // 通知关闭路径：线程已收尾（接收方可能已超时放弃，忽略发送失败）。
+        let _ = finished_tx.send(());
     });
 
     // 等端点绑定后拿到本机地址：服务线程绑定失败时通道关闭，这里直接报错。
@@ -1372,6 +1416,7 @@ pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServ
         stop,
         alive,
         join: Mutex::new(Some(join)),
+        finished: Mutex::new(Some(finished_rx)),
         own_name,
     })
 }
