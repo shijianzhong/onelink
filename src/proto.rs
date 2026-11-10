@@ -12,10 +12,20 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Frame {
-    /// 客户端问候：报告自己的设备名。
-    Hello { name: String },
-    /// 服务端应答：报告自己的设备名。
-    HelloAck { name: String },
+    /// 客户端问候：报告自己的设备名与可选头像（base64 PNG）。
+    Hello {
+        name: String,
+        // 旧版本不带该字段：`default` 让缺失解成 None，`skip_serializing_if`
+        // 让"没设头像"时的线格式与旧版逐字节一致。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        avatar: Option<String>,
+    },
+    /// 服务端应答：报告自己的设备名与可选头像（base64 PNG）。
+    HelloAck {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        avatar: Option<String>,
+    },
     /// 一条聊天消息。
     Chat {
         id: u64,

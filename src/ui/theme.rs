@@ -68,7 +68,6 @@ pub mod text {
     pub const BODY: f32 = 13.;
     pub const MESSAGE: f32 = 14.;
     pub const TITLE: f32 = 15.;
-    pub const BRAND: f32 = 17.;
 }
 
 /// 关键尺寸。

@@ -2,6 +2,7 @@ mod common;
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use gpui_kit::TestAppContext;
@@ -117,6 +118,58 @@ fn empty_registry_shows_placeholder(cx: &mut TestAppContext) {
             hint.label().unwrap_or_default().contains("等待发现设备"),
             "hint label missing"
         );
+    })
+    .unwrap();
+}
+
+/// 对端头像：设置后渲染图片槽，清除后回落到首字槽（不出现空白框）。
+#[gpui_kit::test]
+fn avatar_replaces_initial_slot_and_falls_back_when_cleared(cx: &mut TestAppContext) {
+    let (handle, list) = common::open_window(cx, None, |_, cx| {
+        cx.new(|cx| {
+            let mut list = DeviceList::new(cx);
+            list.registry_mut().upsert(DeviceInfo {
+                node_id: "n1".into(),
+                name: "书房Mac".into(),
+                alias: None,
+                addr: None,
+                online: true,
+                last_seen: SystemTime::now(),
+            });
+            list
+        })
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(window.try_find("avatar-initial-n1").is_some());
+        assert!(window.try_find("avatar-img-n1").is_none());
+    })
+    .unwrap();
+
+    let png = {
+        use base64::Engine as _;
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([30, 140, 210, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(out.into_inner())
+    };
+    let bytes: Arc<[u8]> = Arc::from(onelink::avatar::sanitize(&png).expect("valid png"));
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        list.update(cx, |list, cx| list.set_avatar("n1", Some(bytes), cx));
+        window.draw(cx).clear(cx);
+        assert!(window.try_find("avatar-img-n1").is_some());
+        assert!(window.try_find("avatar-initial-n1").is_none());
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        list.update(cx, |list, cx| list.set_avatar("n1", None, cx));
+        window.draw(cx).clear(cx);
+        assert!(window.try_find("avatar-initial-n1").is_some());
     })
     .unwrap();
 }

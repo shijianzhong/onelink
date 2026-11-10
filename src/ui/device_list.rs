@@ -4,12 +4,14 @@
 //! 选中行整行加深底色，符合 IM 侧栏的信息层级。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    Context, Entity, EventEmitter, FontWeight, IntoElement, KeyDownEvent, ParentElement, Render,
-    ScrollHandle, Styled, Subscription, Window, div, prelude::*, px, rgb,
+    Context, Entity, EventEmitter, FontWeight, Image, ImageFormat, ImageSource, IntoElement,
+    KeyDownEvent, ParentElement, Render, ScrollHandle, Styled, Subscription, Window, div, img,
+    prelude::*, px, rgb,
 };
 
 use crate::model::{DeviceInfo, DeviceRegistry, apply_ui_event};
@@ -40,10 +42,12 @@ pub struct DeviceList {
     selected: Option<String>,
     /// 各 peer 的未读数（由 `App` 从 `ChatStore` 同步过来，组件自己不算）。
     unread: BTreeMap<String, u32>,
+    /// 各 peer 的头像（已校验的 PNG 字节，握手时刷新；不落库）。
+    avatars: BTreeMap<String, Arc<[u8]>>,
     /// 正在改备注的 node id（行内编辑态）。
     editing: Option<String>,
-    /// 行内编辑框；与 `editing` 同时存在。
-    alias_input: Option<Entity<TextareaState>>,
+    /// 行内编辑框；与 `editing` 同时存在（单行 `Input`，不是多行 `Textarea`）。
+    alias_input: Option<Entity<InputState>>,
     /// 编辑框事件订阅（Enter 提交）；退出编辑即 drop。
     _alias_sub: Option<Subscription>,
     /// 正在等二次确认删除的 node id（删除不可撤销，避免误点）。
@@ -58,6 +62,7 @@ impl DeviceList {
             registry: DeviceRegistry::new(),
             selected: None,
             unread: BTreeMap::new(),
+            avatars: BTreeMap::new(),
             editing: None,
             alias_input: None,
             _alias_sub: None,
@@ -102,6 +107,23 @@ impl DeviceList {
         cx.notify();
     }
 
+    /// 更新某个 peer 的头像；`None` 表示移除（回退首字头像）。
+    pub fn set_avatar(&mut self, node_id: &str, png: Option<Arc<[u8]>>, cx: &mut Context<Self>) {
+        let changed = match png {
+            Some(png) => {
+                let same = self.avatars.get(node_id) == Some(&png);
+                if !same {
+                    self.avatars.insert(node_id.to_string(), png);
+                }
+                !same
+            }
+            None => self.avatars.remove(node_id).is_some(),
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
     /// 应用一条网络事件（经注册表合并），有变化即通知重绘。
     pub fn apply(&mut self, event: UiEvent, cx: &mut Context<Self>) {
         let changes = apply_ui_event(&mut self.registry, event);
@@ -124,7 +146,7 @@ impl DeviceList {
             .get(node_id)
             .and_then(|d| d.alias.clone())
             .unwrap_or_default();
-        let input = cx.new(|cx| TextareaState::new(window, cx).submit_on_enter(true));
+        let input = cx.new(|cx| InputState::new(window, cx).submit_on_enter(true));
         input.update(cx, |state, cx| {
             state.set_value(current, window, cx);
             state.set_placeholder("留空恢复原名", window, cx);
@@ -191,6 +213,7 @@ impl DeviceList {
     pub fn forget(&mut self, node_id: &str, cx: &mut Context<Self>) {
         let _ = self.registry.remove(node_id);
         let _ = self.unread.remove(node_id);
+        let _ = self.avatars.remove(node_id);
         if self.selected.as_deref() == Some(node_id) {
             self.selected = None;
         }
@@ -206,12 +229,13 @@ impl DeviceList {
     }
 }
 
-/// 一行设备：头像（名字首字）+ 名字/短 id + 未读角标；离线行可删除。
+/// 一行设备：头像（对端头像或名字首字）+ 名字/短 id + 未读角标；离线行可删除。
 fn device_row(
     device: &DeviceInfo,
     selected: bool,
     unread: u32,
     confirm_delete: bool,
+    avatar: Option<Arc<[u8]>>,
     cx: &mut Context<DeviceList>,
 ) -> gpui_kit::AnyElement {
     let device_id = device.node_id.clone();
@@ -250,9 +274,15 @@ fn device_row(
         .rounded(px(radius::MD))
         .when(selected, |row| row.bg(rgb(color::SELECTED)))
         .hover(|row| row.bg(rgb(color::HOVER)))
-        .child(
-            // 头像：单字占位，避免引入网络头像依赖。
-            div()
+        .child({
+            // 头像槽：对端设置过就渲染图片，否则回落到名字首字。
+            let slot = div()
+                .id(if avatar.is_some() {
+                    format!("avatar-img-{}", device.node_id)
+                } else {
+                    format!("avatar-initial-{}", device.node_id)
+                })
+                .test_support()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -260,11 +290,22 @@ fn device_row(
                 .h(px(size::AVATAR))
                 .flex_shrink_0()
                 .rounded(px(radius::SM))
+                .overflow_hidden()
                 .bg(rgb(color::AVATAR))
                 .text_size(px(text::MESSAGE))
-                .text_color(rgb(color::TEXT_SECONDARY))
-                .child(initial),
-        )
+                .text_color(rgb(color::TEXT_SECONDARY));
+            match avatar {
+                Some(png) => slot.child(
+                    img(ImageSource::Image(Arc::new(Image::from_bytes(
+                        ImageFormat::Png,
+                        png.to_vec(),
+                    ))))
+                    .w(px(size::AVATAR))
+                    .h(px(size::AVATAR)),
+                ),
+                None => slot.child(initial),
+            }
+        })
         .child(
             div()
                 .flex()
@@ -411,7 +452,7 @@ fn device_row(
 /// 行内备注编辑：焦点描边沿用输入框的淡绿 token；Enter 提交、Esc 取消。
 fn alias_editor_row(
     node_id: &str,
-    input: &Entity<TextareaState>,
+    input: &Entity<InputState>,
     cx: &mut Context<DeviceList>,
 ) -> gpui_kit::AnyElement {
     let action = |id: String, label: &'static str, accent: bool| {
@@ -453,16 +494,17 @@ fn alias_editor_row(
                 .flex_1()
                 .min_w(px(0.))
                 .h(px(30.))
-                .px(px(space::S2))
                 .rounded(px(radius::SM))
                 .bg(rgb(color::SURFACE))
                 .border_1()
                 // 静态分隔色：聚焦不加任何描边强调，只靠光标。
                 .border_color(rgb(color::DIVIDER))
+                .overflow_hidden()
+                // 单行 Input 自带左右 padding 且根行 items_center，文字在 30px 内垂直居中。
                 .child(
-                    Textarea::new(input)
+                    Input::new(input)
                         .appearance(false)
-                        .h(px(26.))
+                        .h(px(30.))
                         .text_size(px(text::CAPTION)),
                 ),
         )
@@ -498,6 +540,7 @@ impl Render for DeviceList {
         let unread_all = self.unread.clone();
         let selected = self.selected.clone();
         let confirm_delete = self.confirm_delete.clone();
+        let avatars = self.avatars.clone();
 
         if devices.is_empty() {
             return div()
@@ -548,7 +591,8 @@ impl Render for DeviceList {
                 let is_selected = selected.as_deref() == Some(d.node_id.as_str());
                 let unread = unread_all.get(&d.node_id).copied().unwrap_or(0);
                 let confirming = confirm_delete.as_deref() == Some(d.node_id.as_str());
-                device_row(d, is_selected, unread, confirming, cx)
+                let avatar = avatars.get(&d.node_id).cloned();
+                device_row(d, is_selected, unread, confirming, avatar, cx)
             }));
 
         // 滚动条放在滚动容器之外：它自己是 100%×100% 的绝对定位覆盖层，

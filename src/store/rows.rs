@@ -80,10 +80,20 @@ pub fn load(conn: &Connection) -> Result<Loaded> {
         .ok()
         // 空串代表"用默认名"：加载时归一成 None，UI/网络层按主机名兜底。
         .filter(|name: &String| !name.trim().is_empty());
+    // 头像同理：库里存的是 base64 PNG，坏数据当没有（UI 回退首字头像）。
+    let self_avatar: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'self_avatar'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|b64| crate::avatar::sanitize(b64).is_some());
     Ok(Loaded {
         devices,
         histories,
         self_nickname,
+        self_avatar,
     })
 }
 
@@ -201,5 +211,22 @@ pub fn set_self_nickname(conn: &Connection, nickname: &str) -> Result<()> {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![nickname],
     )?;
+    Ok(())
+}
+
+/// 保存本机头像（base64 PNG）；`None` 删除该设置，回到首字头像。
+pub fn set_self_avatar(conn: &Connection, avatar: Option<&str>) -> Result<()> {
+    match avatar {
+        Some(b64) => {
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES ('self_avatar', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![b64],
+            )?;
+        }
+        None => {
+            conn.execute("DELETE FROM settings WHERE key = 'self_avatar'", [])?;
+        }
+    }
     Ok(())
 }

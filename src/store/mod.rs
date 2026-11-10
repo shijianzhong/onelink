@@ -20,6 +20,8 @@ pub struct Loaded {
     pub devices: Vec<DeviceInfo>,
     pub histories: BTreeMap<String, Vec<ChatMessage>>,
     pub self_nickname: Option<String>,
+    /// 本机头像（base64 PNG）；头像坏掉/未设置时为 `None`。
+    pub self_avatar: Option<String>,
 }
 
 enum Command {
@@ -43,6 +45,8 @@ enum Command {
         last_seen: SystemTime,
     },
     SetSelfNickname(String),
+    /// 保存本机头像（base64 PNG）；`None` 表示清除。
+    SetSelfAvatar(Option<String>),
     /// 删除设备，连同它的会话与消息（不可撤销）。
     DeleteDevice(String),
 }
@@ -131,6 +135,11 @@ impl Store {
         self.send(Command::SetSelfNickname(nickname.to_string()));
     }
 
+    /// 保存本机头像（base64 PNG）；传 `None` 清除。
+    pub fn set_self_avatar(&self, avatar: Option<String>) {
+        self.send(Command::SetSelfAvatar(avatar));
+    }
+
     /// 删除设备（离线设备的清理入口）：设备行、会话、历史消息一起删，不可撤销。
     pub fn delete_device(&self, node_id: &str) {
         self.send(Command::DeleteDevice(node_id.to_string()));
@@ -207,6 +216,7 @@ fn apply(conn: &Connection, cmd: Command) -> anyhow::Result<()> {
             rows::set_last_seen(conn, &node_id, last_seen)
         }
         Command::SetSelfNickname(nickname) => rows::set_self_nickname(conn, &nickname),
+        Command::SetSelfAvatar(avatar) => rows::set_self_avatar(conn, avatar.as_deref()),
         Command::DeleteDevice(node_id) => rows::delete_device(conn, &node_id),
     }
 }

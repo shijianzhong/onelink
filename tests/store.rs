@@ -48,6 +48,48 @@ fn nickname_persists_and_blank_means_default_on_reopen() {
 }
 
 #[test]
+fn avatar_persists_survives_reopen_and_clears() {
+    use base64::Engine as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("onelink.db");
+    let avatar = {
+        let img = image::RgbaImage::from_pixel(24, 24, image::Rgba([10, 200, 90, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(out.into_inner())
+    };
+
+    {
+        let (store, _) = Store::open(&path);
+        store.set_self_avatar(Some(avatar.clone()));
+    }
+    let (store, loaded) = Store::open(&path);
+    assert_eq!(loaded.self_avatar.as_deref(), Some(avatar.as_str()));
+
+    // 清除后重启不应再冒出来。
+    store.set_self_avatar(None);
+    drop(store);
+    let (_, loaded) = Store::open(&path);
+    assert!(loaded.self_avatar.is_none());
+}
+
+/// 库里存了坏头像（不是合法 base64/PNG）时，加载按"没设置"处理，不阻断启动。
+#[test]
+fn broken_avatar_setting_is_ignored_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("onelink.db");
+    {
+        let (store, _) = Store::open(&path);
+        store.set_self_avatar(Some("bm90IGEgcG5n".to_string()));
+    }
+    let (_, loaded) = Store::open(&path);
+    assert!(loaded.self_avatar.is_none());
+}
+
+#[test]
 fn alias_change_and_clear_survive_reopen_and_fall_back_to_remote_name() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("onelink.db");

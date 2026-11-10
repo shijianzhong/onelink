@@ -38,11 +38,22 @@ pub const MDNS_SERVICE: &str = "onelink-v1";
 pub const EVENT_QUEUE_CAPACITY: usize = 32;
 
 /// 握手协议单条消息的大小上限（防御畸形/超大 payload）。
-pub const MAX_HANDSHAKE_BYTES: usize = 4096;
+///
+/// 比 `MAX_FRAME_BYTES` 略小：握手帧可能带头像（base64 后约 21 KiB），
+/// 旧版 4 KiB 会截断，这里放宽到 48 KiB 仍留有余量。
+pub const MAX_HANDSHAKE_BYTES: usize = 48 * 1024;
 
 /// 握手消息别名：M1 的 `HelloMsg` 现由 [`Frame`] 的 `Hello`/`HelloAck` 变体承载，
 /// 线格式逐字节不变（`{"Hello":{"name":"x"}}`）。
 pub type HelloMsg = Frame;
+
+/// 一次握手的对端信息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerHello {
+    pub name: String,
+    /// 对端头像（base64 PNG）；旧版本对端恒为 `None`。
+    pub avatar: Option<String>,
+}
 
 /// 网络层 → UI 侧事件。
 #[derive(Debug, Clone)]
@@ -55,6 +66,11 @@ pub enum UiEvent {
     DeviceNamed {
         node_id: String,
         name: String,
+    },
+    /// 握手拿到对端头像（已校验的 PNG 字节）；`None` 表示对端没设置或数据不可用。
+    DeviceAvatar {
+        node_id: String,
+        png: Option<Arc<[u8]>>,
     },
     DeviceLost {
         node_id: String,
@@ -205,6 +221,8 @@ pub struct IrohServiceHandle {
     finished: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     /// 运行期可换的对外昵称（握手应答/主动握手都读它）。
     own_name: OwnName,
+    /// 运行期可换的对外头像（base64 PNG）。
+    own_avatar: OwnAvatar,
 }
 
 impl IrohServiceHandle {
@@ -244,6 +262,16 @@ impl IrohServiceHandle {
     /// 当前对外昵称（UI 回显/测试用）。
     pub fn own_name(&self) -> String {
         current_own_name(&self.own_name)
+    }
+
+    /// 运行期更换对外头像（`None` 表示不展示头像）。下一次握手立即生效。
+    pub fn set_own_avatar(&self, avatar: Option<String>) {
+        *self.own_avatar.lock().unwrap_or_else(|e| e.into_inner()) = avatar;
+    }
+
+    /// 当前对外头像（测试用）。
+    pub fn own_avatar(&self) -> Option<String> {
+        current_own_avatar(&self.own_avatar)
     }
 
     /// 投递一条聊天消息到 `peer_id`；返回本条消息 id，调用方立刻用它渲染本地气泡。
@@ -778,6 +806,9 @@ pub fn local_device_name() -> String {
 /// 服务运行期的对外昵称：握手时读取，支持不重启服务直接改名。
 pub type OwnName = Arc<std::sync::Mutex<String>>;
 
+/// 本机对外头像（base64 PNG）；`None` 表示没设置，对端回退首字头像。
+pub type OwnAvatar = Arc<std::sync::Mutex<Option<String>>>;
+
 /// 空昵称回退主机名，两侧空白一并去掉。
 fn normalize_own_name(nickname: &str) -> String {
     if nickname.trim().is_empty() {
@@ -792,12 +823,18 @@ pub fn current_own_name(name: &OwnName) -> String {
     name.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// 主动握手：连接对方，打开双向流发 `Hello{our_name}`，读回 `HelloAck{name}`。
+/// 当前对外头像（base64 PNG）。
+pub fn current_own_avatar(avatar: &OwnAvatar) -> Option<String> {
+    avatar.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// 主动握手：连接对方，发 `Hello{our_name, avatar}`，读回 `HelloAck{name, avatar}`。
 pub async fn handshake_name(
     endpoint: &Endpoint,
     peer: EndpointAddr,
     our_name: &str,
-) -> anyhow::Result<String> {
+    our_avatar: Option<String>,
+) -> anyhow::Result<PeerHello> {
     let conn = endpoint
         .connect(peer, ALPN)
         .await
@@ -808,6 +845,7 @@ pub async fn handshake_name(
         .map_err(|e| anyhow::anyhow!("open_bi: {e}"))?;
     let hello = serde_json::to_vec(&HelloMsg::Hello {
         name: our_name.to_string(),
+        avatar: our_avatar,
     })?;
     send.write_all(&hello).await?;
     send.shutdown().await?;
@@ -817,15 +855,20 @@ pub async fn handshake_name(
         .await
         .map_err(|e| anyhow::anyhow!("read hello ack: {e}"))?;
     match serde_json::from_slice::<HelloMsg>(&buf)? {
-        HelloMsg::HelloAck { name } => Ok(name),
+        HelloMsg::HelloAck { name, avatar } => Ok(PeerHello { name, avatar }),
         other => anyhow::bail!("expected HelloAck, got {other:?}"),
     }
 }
 
-/// 被动握手：循环接受连接，读 `Hello`、回 `HelloAck{our_name}`。
-pub async fn serve_handshake(endpoint: &Endpoint, our_name: &str) -> anyhow::Result<()> {
+/// 被动握手：循环接受连接，读 `Hello`、回 `HelloAck{our_name, avatar}`。
+pub async fn serve_handshake(
+    endpoint: &Endpoint,
+    our_name: &str,
+    our_avatar: Option<String>,
+) -> anyhow::Result<()> {
     while let Some(incoming) = endpoint.accept().await {
         let our_name = our_name.to_string();
+        let our_avatar = our_avatar.clone();
         tokio::spawn(async move {
             let conn = match incoming.await {
                 Ok(c) => c,
@@ -834,7 +877,7 @@ pub async fn serve_handshake(endpoint: &Endpoint, our_name: &str) -> anyhow::Res
                     return;
                 }
             };
-            if let Err(e) = answer_hello(conn, &our_name).await {
+            if let Err(e) = answer_hello(conn, &our_name, our_avatar.as_deref()).await {
                 tracing::warn!("hello exchange failed: {e:#}");
             }
         });
@@ -842,7 +885,11 @@ pub async fn serve_handshake(endpoint: &Endpoint, our_name: &str) -> anyhow::Res
     Ok(())
 }
 
-async fn answer_hello(conn: iroh::endpoint::Connection, our_name: &str) -> anyhow::Result<()> {
+async fn answer_hello(
+    conn: iroh::endpoint::Connection,
+    our_name: &str,
+    our_avatar: Option<&str>,
+) -> anyhow::Result<()> {
     let (mut send, mut recv) = conn
         .accept_bi()
         .await
@@ -852,12 +899,13 @@ async fn answer_hello(conn: iroh::endpoint::Connection, our_name: &str) -> anyho
         .await
         .map_err(|e| anyhow::anyhow!("read hello: {e}"))?;
     let peer_name = match serde_json::from_slice::<HelloMsg>(&buf)? {
-        HelloMsg::Hello { name } => name,
+        HelloMsg::Hello { name, .. } => name,
         other => anyhow::bail!("expected Hello, got {other:?}"),
     };
     tracing::info!(peer_name, "received hello");
     let ack = serde_json::to_vec(&HelloMsg::HelloAck {
         name: our_name.to_string(),
+        avatar: our_avatar.map(str::to_string),
     })?;
     send.write_all(&ack).await?;
     send.shutdown().await?;
@@ -878,18 +926,21 @@ pub async fn serve_frames(
 ) -> anyhow::Result<()> {
     // 固定昵称入口：内部包成一个不会变化的共享名，供测试/工具直接调用。
     let fixed: OwnName = Arc::new(std::sync::Mutex::new(our_name.to_string()));
-    serve_frames_with_name(endpoint, &fixed, queue, xfers).await
+    let no_avatar: OwnAvatar = Arc::new(std::sync::Mutex::new(None));
+    serve_frames_with_name(endpoint, &fixed, &no_avatar, queue, xfers).await
 }
 
-/// 服务入口：昵称从共享单元现读，`set_own_name` 后下一帧握手即用新名。
+/// 服务入口：昵称/头像从共享单元现读，`set_own_name`/`set_own_avatar` 后下一帧握手即生效。
 pub async fn serve_frames_with_name(
     endpoint: &Endpoint,
     our_name: &OwnName,
+    our_avatar: &OwnAvatar,
     queue: &Arc<EventQueue>,
     xfers: &Arc<XferState>,
 ) -> anyhow::Result<()> {
     while let Some(incoming) = endpoint.accept().await {
         let our_name = Arc::clone(our_name);
+        let our_avatar = Arc::clone(our_avatar);
         let queue = Arc::clone(queue);
         let xfers = Arc::clone(xfers);
         let endpoint = endpoint.clone();
@@ -906,7 +957,7 @@ pub async fn serve_frames_with_name(
                     tracing::warn!("file receive failed: {e:#}");
                 }
             } else if let Err(e) =
-                dispatch_connection(conn, &our_name, &queue, &xfers, &endpoint).await
+                dispatch_connection(conn, &our_name, &our_avatar, &queue, &xfers, &endpoint).await
             {
                 tracing::warn!("frame dispatch failed: {e:#}");
             }
@@ -939,6 +990,7 @@ async fn read_framed(recv: &mut iroh::endpoint::RecvStream, limit: usize) -> any
 pub async fn dispatch_connection(
     conn: Connection,
     our_name: &OwnName,
+    our_avatar: &OwnAvatar,
     queue: &Arc<EventQueue>,
     xfers: &Arc<XferState>,
     endpoint: &Endpoint,
@@ -959,10 +1011,11 @@ pub async fn dispatch_connection(
         }
     };
     match frame {
-        Frame::Hello { name } => {
+        Frame::Hello { name, .. } => {
             tracing::info!(peer_name = %name, "received hello");
             let ack = encode_frame(&Frame::HelloAck {
                 name: current_own_name(our_name),
+                avatar: current_own_avatar(our_avatar),
             })?;
             send.write_all(&ack).await?;
             send.shutdown().await?;
@@ -1237,19 +1290,20 @@ pub fn spawn_iroh_service() -> anyhow::Result<IrohServiceHandle> {
     spawn_iroh_service_with_name(local_device_name())
 }
 
-/// 启动服务，握手时用调用方给的昵称（空串回退主机名），身份密钥随机。
+/// 启动服务，握手时用调用方给的昵称（空串回退主机名），身份密钥随机、无头像。
 pub fn spawn_iroh_service_with_name(nickname: String) -> anyhow::Result<IrohServiceHandle> {
-    spawn_iroh_service_inner(nickname, None)
+    spawn_iroh_service_inner(nickname, None, None)
 }
 
 /// 用持久化身份启动：密钥不存在时生成并写入 `key_path`，之后每次重启复用，
-/// 保证 node id 稳定（对端不会再把你当成一台新设备）。
+/// 保证 node id 稳定（对端不会再把你当成一台新设备）。`avatar` 是 base64 PNG。
 pub fn spawn_iroh_service_persistent(
     nickname: String,
     key_path: &Path,
+    avatar: Option<String>,
 ) -> anyhow::Result<IrohServiceHandle> {
     let key = load_or_create_secret_key(key_path)?;
-    spawn_iroh_service_inner(nickname, Some(key))
+    spawn_iroh_service_inner(nickname, Some(key), avatar)
 }
 
 /// 读取 endpoint 身份密钥；文件不存在时生成并落盘（0600）。
@@ -1333,10 +1387,13 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 fn spawn_iroh_service_inner(
     nickname: String,
     key: Option<SecretKey>,
+    avatar: Option<String>,
 ) -> anyhow::Result<IrohServiceHandle> {
     // 昵称优先取本地设置；为空则用主机名兜底。运行期可经 `set_own_name` 替换。
     let own_name: OwnName = Arc::new(std::sync::Mutex::new(normalize_own_name(&nickname)));
+    let own_avatar: OwnAvatar = Arc::new(std::sync::Mutex::new(avatar));
     let thread_own_name = Arc::clone(&own_name);
+    let thread_own_avatar = Arc::clone(&own_avatar);
     let queue = EventQueue::new(EVENT_QUEUE_CAPACITY);
     let service_queue = Arc::clone(&queue);
     let err_queue = Arc::clone(&queue);
@@ -1393,12 +1450,18 @@ fn spawn_iroh_service_inner(
             // （非 ALPN 连接已在 alpns 层拒绝）。
             let endpoint_serve = endpoint.clone();
             let serve_name = Arc::clone(&thread_own_name);
+            let serve_avatar = Arc::clone(&thread_own_avatar);
             let serve_queue = Arc::clone(&service_queue);
             let serve_xfers = Arc::clone(&thread_xfers);
             let serve_task = tokio::spawn(async move {
-                if let Err(e) =
-                    serve_frames_with_name(&endpoint_serve, &serve_name, &serve_queue, &serve_xfers)
-                        .await
+                if let Err(e) = serve_frames_with_name(
+                    &endpoint_serve,
+                    &serve_name,
+                    &serve_avatar,
+                    &serve_queue,
+                    &serve_xfers,
+                )
+                .await
                 {
                     tracing::warn!("serve_frames ended: {e:#}");
                 }
@@ -1408,6 +1471,7 @@ fn spawn_iroh_service_inner(
             let mdns_queue = Arc::clone(&service_queue);
             let endpoint_mdns = endpoint.clone();
             let mdns_name = Arc::clone(&thread_own_name);
+            let mdns_avatar = Arc::clone(&thread_own_avatar);
             let mdns_task = tokio::spawn(async move {
                 let mut stream = mdns.subscribe().await;
                 let mut handshaked: HashSet<EndpointId> = HashSet::new();
@@ -1422,21 +1486,39 @@ fn spawn_iroh_service_inner(
                         }
                         let ep = endpoint_mdns.clone();
                         let name = mdns_name.clone();
+                        let avatar = Arc::clone(&mdns_avatar);
                         let q = Arc::clone(&mdns_queue);
                         tokio::spawn(async move {
                             let mut attempt = 0;
                             loop {
                                 attempt += 1;
                                 let our = current_own_name(&name);
-                                match handshake_name(&ep, EndpointAddr::from(peer_id), &our).await {
-                                    Ok(peer_name) => {
+                                let our_avatar = current_own_avatar(&avatar);
+                                match handshake_name(
+                                    &ep,
+                                    EndpointAddr::from(peer_id),
+                                    &our,
+                                    our_avatar,
+                                )
+                                .await
+                                {
+                                    Ok(peer) => {
+                                        let node_id = peer_id.to_string();
                                         push_event(
                                             &q,
                                             UiEvent::DeviceNamed {
-                                                node_id: peer_id.to_string(),
-                                                name: peer_name,
+                                                node_id: node_id.clone(),
+                                                name: peer.name,
                                             },
                                         );
+                                        // 头像先在本机校验（尺寸/可解码），坏数据当没有，
+                                        // UI 侧就自然回退首字头像。
+                                        let png = peer
+                                            .avatar
+                                            .as_deref()
+                                            .and_then(crate::avatar::sanitize)
+                                            .map(|png| Arc::<[u8]>::from(png));
+                                        push_event(&q, UiEvent::DeviceAvatar { node_id, png });
                                         break;
                                     }
                                     Err(e) if attempt < 3 => {
@@ -1522,6 +1604,7 @@ fn spawn_iroh_service_inner(
         join: Mutex::new(Some(join)),
         finished: Mutex::new(Some(finished_rx)),
         own_name,
+        own_avatar,
     })
 }
 

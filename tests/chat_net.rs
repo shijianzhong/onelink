@@ -80,10 +80,10 @@ async fn hello_still_answered_by_frame_dispatch() {
         let _ = serve_frames(&a_serve, "服务端A", &q, &x).await;
     });
 
-    let got = onelink::net::handshake_name(&b, a.addr(), "客户端B")
+    let got = onelink::net::handshake_name(&b, a.addr(), "客户端B", None)
         .await
         .unwrap();
-    assert_eq!(got, "服务端A");
+    assert_eq!(got.name, "服务端A");
 
     b.close().await;
     a.close().await;

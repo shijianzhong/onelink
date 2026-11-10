@@ -5,10 +5,11 @@ use onelink::net::{HelloMsg, UiEvent, handshake_name, serve_handshake};
 fn hello_msg_roundtrips_json() {
     let m = HelloMsg::Hello {
         name: "书房Mac".into(),
+        avatar: None,
     };
     let bytes = serde_json::to_vec(&m).unwrap();
     let back: HelloMsg = serde_json::from_slice(&bytes).unwrap();
-    assert!(matches!(back, HelloMsg::Hello { name } if name == "书房Mac"));
+    assert!(matches!(back, HelloMsg::Hello { name, avatar: None } if name == "书房Mac"));
 }
 
 #[test]
@@ -115,8 +116,8 @@ async fn runtime_nickname_is_sent_in_next_handshake() {
         .bind()
         .await
         .unwrap();
-    let got = handshake_name(&client, addr, "客户端").await.unwrap();
-    assert_eq!(got, "改名后");
+    let got = handshake_name(&client, addr, "客户端", None).await.unwrap();
+    assert_eq!(got.name, "改名后");
 
     // 空串回退主机名。
     service.set_own_name("   ");
@@ -146,12 +147,56 @@ async fn two_endpoints_exchange_names_over_stream() {
 
     let b_name = "云主机".to_string();
     let b_shutdown = b.clone();
-    let server = tokio::spawn(async move { serve_handshake(&b, &b_name).await });
+    let server = tokio::spawn(async move { serve_handshake(&b, &b_name, None).await });
 
-    let got = handshake_name(&a, b_addr, "书房Mac").await.unwrap();
-    assert_eq!(got, "云主机");
+    let got = handshake_name(&a, b_addr, "书房Mac", None).await.unwrap();
+    assert_eq!(got.name, "云主机");
 
     // 优雅收尾：关掉两个 endpoint，让 serve 循环自然结束
+    a.close().await;
+    b_shutdown.close().await;
+    let _ = server.await;
+}
+
+/// 小 PNG 头像（base64）：32×32 纯色，远低于线上限。
+fn avatar_b64(rgb: [u8; 3]) -> String {
+    use base64::Engine as _;
+    let img = image::RgbaImage::from_pixel(32, 32, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .unwrap();
+    base64::engine::general_purpose::STANDARD.encode(out.into_inner())
+}
+
+/// 头像随 Hello/HelloAck 双向传输；没设置时字段缺省，旧版对端不受影响。
+#[tokio::test]
+async fn avatar_travels_with_hello_and_ack() {
+    use iroh::endpoint::presets;
+    use onelink::net::ALPN;
+
+    fn builder() -> iroh::endpoint::Builder {
+        iroh::Endpoint::builder(presets::Minimal).alpns(vec![ALPN.to_vec()])
+    }
+
+    let a = builder().bind().await.unwrap();
+    let b = builder().bind().await.unwrap();
+    let b_addr = b.addr();
+
+    let b_avatar = avatar_b64([20, 140, 220]);
+    let a_avatar = avatar_b64([220, 60, 40]);
+    let b_shutdown = b.clone();
+    let server_avatar = b_avatar.clone();
+    let server = tokio::spawn(async move {
+        serve_handshake(&b, &"云主机".to_string(), Some(server_avatar)).await
+    });
+
+    let got = handshake_name(&a, b_addr, "书房Mac", Some(a_avatar))
+        .await
+        .unwrap();
+    assert_eq!(got.name, "云主机");
+    assert_eq!(got.avatar.as_deref(), Some(b_avatar.as_str()));
+
     a.close().await;
     b_shutdown.close().await;
     let _ = server.await;

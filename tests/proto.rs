@@ -3,8 +3,14 @@ use onelink::proto::{Frame, MAX_FRAME_BYTES, decode_frame, encode_frame};
 #[test]
 fn roundtrips_all_variants() {
     let frames = [
-        Frame::Hello { name: "A".into() },
-        Frame::HelloAck { name: "B".into() },
+        Frame::Hello {
+            name: "A".into(),
+            avatar: None,
+        },
+        Frame::HelloAck {
+            name: "B".into(),
+            avatar: None,
+        },
         Frame::Chat {
             id: 7,
             text: "你好".into(),
@@ -21,11 +27,58 @@ fn roundtrips_all_variants() {
 #[test]
 fn hello_wire_format_stays_m1_compatible() {
     // M1 的 HelloMsg 就是 {"Hello":{"name":"x"}}，M2 必须沿用，否则旧版本互通会断
-    let bytes = encode_frame(&Frame::Hello { name: "x".into() }).unwrap();
+    let bytes = encode_frame(&Frame::Hello {
+        name: "x".into(),
+        avatar: None,
+    })
+    .unwrap();
     assert_eq!(
         String::from_utf8(bytes).unwrap(),
         r#"{"Hello":{"name":"x"}}"#
     );
+}
+
+/// 旧版本发来的 Hello（没有 avatar 字段）必须仍能解出 `avatar: None`。
+#[test]
+fn old_hello_without_avatar_still_decodes() {
+    let frame = decode_frame(r#"{"Hello":{"name":"旧版"}}"#.as_bytes(), MAX_FRAME_BYTES).unwrap();
+    assert_eq!(
+        frame,
+        Frame::Hello {
+            name: "旧版".into(),
+            avatar: None
+        }
+    );
+    let frame = decode_frame(
+        r#"{"HelloAck":{"name":"旧版"}}"#.as_bytes(),
+        MAX_FRAME_BYTES,
+    )
+    .unwrap();
+    assert_eq!(
+        frame,
+        Frame::HelloAck {
+            name: "旧版".into(),
+            avatar: None
+        }
+    );
+}
+
+/// 带头像的 Hello 能正常往返；超长头像由编码侧拒绝（不会发出超帧）。
+#[test]
+fn hello_carries_avatar_within_frame_limit() {
+    let avatar = "QUJD".repeat(100);
+    let frame = Frame::Hello {
+        name: "新版".into(),
+        avatar: Some(avatar.clone()),
+    };
+    let bytes = encode_frame(&frame).unwrap();
+    assert_eq!(decode_frame(&bytes, MAX_FRAME_BYTES).unwrap(), frame);
+
+    let too_big = Frame::Hello {
+        name: "新版".into(),
+        avatar: Some("A".repeat(MAX_FRAME_BYTES)),
+    };
+    assert!(encode_frame(&too_big).is_err());
 }
 
 #[test]

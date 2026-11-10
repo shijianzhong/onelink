@@ -181,7 +181,9 @@ pub fn apply_ui_event(
         | UiEvent::TransferProgress { .. }
         | UiEvent::TransferCompleted { .. }
         | UiEvent::TransferFailed { .. }
-        | UiEvent::TransferRejected { .. } => Vec::new(),
+        | UiEvent::TransferRejected { .. }
+        // 头像是渲染层缓存（DeviceList 自己按 node_id 存），不进设备注册表。
+        | UiEvent::DeviceAvatar { .. } => Vec::new(),
         UiEvent::NetError(_) => Vec::new(),
     }
 }

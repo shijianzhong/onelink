@@ -110,55 +110,83 @@ fn alias_edit_updates_row_and_chat_title(cx: &mut TestAppContext) {
     shutdown_iroh_service(&service);
 }
 
-/// 昵称：默认态标"（默认）"，保存后换成新名；Esc 取消不写入。
+/// 侧栏顶部展示本机身份；昵称编辑搬进设置页，返回后侧栏立即用新名。
 #[gpui_kit::test]
-fn nickname_edit_saves_and_escape_cancels(cx: &mut TestAppContext) {
+fn identity_opens_settings_and_nickname_saves(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (handle, app, service) = open_app(cx);
+    let default_name = onelink::net::local_device_name();
 
+    // 侧栏顶部：显示生效的名字（默认主机名）；没有品牌标题、没有行内昵称入口。
     cx.update_window(handle.into(), |_, window, cx| {
         window.draw(cx).clear(cx);
-        let line = window
-            .find("nickname-line")
+        let name = window
+            .find("self-nickname")
             .label()
             .unwrap_or_default()
             .to_string();
-        assert!(line.contains("（默认）"), "line was {line}");
-        window.click("nickname-edit", cx);
+        assert_eq!(name, default_name, "identity name was {name}");
+        assert!(
+            window.try_find("nickname-edit").is_none(),
+            "inline entry gone"
+        );
+        assert!(window.try_find("settings-page").is_none());
+
+        // 点身份块进设置页：头像/昵称两处编辑都在这里。
+        window.click("identity-open-settings", cx);
         window.draw(cx).clear(cx);
+        assert!(
+            window.try_find("settings-page").is_some(),
+            "settings page should open"
+        );
+        // 没设头像 → 预览回落到首字，没有"移除头像"。
+        assert!(window.try_find("avatar-preview-initial").is_some());
+        assert!(window.try_find("avatar-clear").is_none());
+
         window.input("阿钟", cx);
         window.press("enter", cx);
         window.draw(cx).clear(cx);
     })
     .unwrap();
 
-    // 保存后：行显示新昵称，运行期的握手名同步换掉。
     cx.update_window(handle.into(), |_, window, cx| {
         window.draw(cx).clear(cx);
-        let line = window
-            .find("nickname-line")
+        // 保存后设置页的"当前生效"立即更新，网络层握手名同步换掉。
+        let effective = window
+            .find("self-effective-name")
             .label()
             .unwrap_or_default()
             .to_string();
-        assert!(line.contains("阿钟"), "line was {line}");
-        assert!(!line.contains("（默认）"), "line was {line}");
+        assert!(effective.contains("阿钟"), "effective was {effective}");
         assert_eq!(app.read(cx).service_own_name(), "阿钟");
+
+        // 返回聊天：侧栏顶部直接就是新昵称。
+        window.click("settings-back", cx);
+        window.draw(cx).clear(cx);
+        assert!(window.try_find("settings-page").is_none());
+        let name = window
+            .find("self-nickname")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(name, "阿钟", "identity name was {name}");
     })
     .unwrap();
 
-    // 再次打开编辑 → Esc：昵称不变。
+    // Esc 取消：输入框还原为已保存值，未提交的内容不会被写进去。
     cx.update_window(handle.into(), |_, window, cx| {
-        window.click("nickname-edit", cx);
+        window.click("identity-open-settings", cx);
         window.draw(cx).clear(cx);
         window.input("不会生效", cx);
         window.press("escape", cx);
         window.draw(cx).clear(cx);
-        let line = window
-            .find("nickname-line")
-            .label()
-            .unwrap_or_default()
-            .to_string();
-        assert!(line.contains("阿钟"), "line was {line}");
+        window.click("nickname-save", cx);
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    cx.update_window(handle.into(), |_, _, cx| {
+        assert_eq!(app.read(cx).service_own_name(), "阿钟");
     })
     .unwrap();
 
